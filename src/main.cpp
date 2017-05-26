@@ -10,11 +10,12 @@
 #include "job/manager.h"
 #include "imgui/manager.h"
 #include "plugin/manager.h"
+#include "serialization/serializer.h"
 
 #include <algorithm>
 #include <utility>
 
-#include <portaudio.h>
+#include "audio_backend.h"
 
 #include "ispc/acf_ispc.h"
 #include "note.h"
@@ -117,248 +118,104 @@ namespace
 
 	volatile i32 SoundBuffer::SoundBufferID = 0;
 	
-	static const i32 AUDIO_DATA_SIZE = 2048;
+	static const i32 AUDIO_DATA_SIZE = 512;
 
-	class PortAudio
+	class TestAudioCallback : public IAudioCallback
 	{
 	public:
-		struct DeviceInfo
+		void OnAudioCallback(i32 numIn, i32 numOut, const f32** in, f32** out, i32 numFrames) override
 		{
-			char name_[256] = {0};
-			char backend_[256] = {0};
-			PaDeviceIndex deviceIdx_ = 0;
-			i32 maxIn_ = 0;
-			i32 maxOut_ = 0;
-		};
-
-		PortAudio()
-		{
-			Pa_Initialize();
-			audioData_.fill(0.0f);
-		}
-
-		~PortAudio()
-		{
-			if(soundBufferCounter_)
-			{
-				Job::Manager::WaitForCounter(soundBufferCounter_, 0);
-			}
-
-			Pa_Terminate();
-		}
-
-		void Enumerate()
-		{
-			inputDeviceInfos_.clear();
-			outputDeviceInfos_.clear();
-			i32 numDevices = Pa_GetDeviceCount();
-			inputDeviceInfos_.reserve(numDevices);
-			outputDeviceInfos_.reserve(numDevices);
-
-			for(i32 idx = 0; idx < numDevices; ++idx)
-			{
-				const auto* paDeviceInfo = Pa_GetDeviceInfo(idx);
-				if(paDeviceInfo)
-				{
-					DeviceInfo deviceInfo;
-					const auto* paHostAPIInfo = Pa_GetHostApiInfo(paDeviceInfo->hostApi);
-					sprintf_s(deviceInfo.name_, sizeof(deviceInfo.name_), "[%s] - %s", paHostAPIInfo->name, paDeviceInfo->name);
-					deviceInfo.deviceIdx_ = idx;
-					deviceInfo.maxIn_ = paDeviceInfo->maxInputChannels;
-					deviceInfo.maxOut_ = paDeviceInfo->maxOutputChannels;
-					
-					
-					if(deviceInfo.maxIn_ > 0)
-						inputDeviceInfos_.push_back(deviceInfo);
-					if(deviceInfo.maxOut_ > 0)
-						outputDeviceInfos_.push_back(deviceInfo);
-				}
-			}
-
-			std::sort(inputDeviceInfos_.begin(), inputDeviceInfos_.end(), 
-				[](const DeviceInfo& a, const DeviceInfo& b)
-				{
-					return strcmp(a.name_, b.name_) < 0;
-				});
-			std::sort(outputDeviceInfos_.begin(), outputDeviceInfos_.end(), 
-				[](const DeviceInfo& a, const DeviceInfo& b)
-				{
-					return strcmp(a.name_, b.name_) < 0;
-				});
-		}
-
-		void StartDevice(i32 in, i32 out, i32 inChannel)
-		{
-			if(stream_)
-			{
-				Pa_StopStream(stream_);
-				Pa_CloseStream(stream_);
-				stream_ = nullptr;
-				audioData_.fill(0.0f);
-			}
-			const auto& inputDevice = inputDeviceInfos_[in];
-			const auto& outputDevice = outputDeviceInfos_[out];
-			const auto* paDeviceInfoIn = Pa_GetDeviceInfo(inputDevice.deviceIdx_);
-			const auto* paDeviceInfoOut = Pa_GetDeviceInfo(outputDevice.deviceIdx_);
-
-			inChannel_ = inChannel;
-			outChannels_ = outputDevice.maxOut_;
-
-			PaStreamParameters inParams;
-			inParams.device = inputDevice.deviceIdx_;
-			inParams.channelCount = inputDevice.maxIn_;
-			inParams.sampleFormat = paFloat32 | paNonInterleaved;
-			inParams.suggestedLatency = paDeviceInfoIn->defaultLowInputLatency;
-			inParams.hostApiSpecificStreamInfo = nullptr;
-
-			PaStreamParameters outParams;
-			outParams.device = outputDevice.deviceIdx_;
-			outParams.channelCount = outputDevice.maxOut_;
-			outParams.sampleFormat = paFloat32 | paNonInterleaved;
-			outParams.suggestedLatency = paDeviceInfoOut->defaultLowOutputLatency;
-			outParams.hostApiSpecificStreamInfo = nullptr;
-
-			Pa_OpenStream(&stream_, &inParams, &outParams, 48000.0, AUDIO_DATA_SIZE, paNoFlag, StaticStreamCallback, this);
-			Pa_StartStream(stream_);
-		}
-
-		inline int StreamCallback(const void *input, void *output,
-			unsigned long frameCount,
-			const PaStreamCallbackTimeInfo* timeInfo,
-			PaStreamCallbackFlags statusFlags)
-		{
-			const f32* const* fin = reinterpret_cast<const f32* const*>(input);
-			f32** fout = reinterpret_cast<f32**>(output);
-
 			// If RMS is over a certain amount, create a sound buffer.
-			f64 rms = 0.0f;
-			const f32* inData = fin[inChannel_];
-			for(i32 idx = 0; idx < AUDIO_DATA_SIZE; ++idx)
+			if(numIn > 0)
 			{
-				rms += (inData[idx] * inData[idx]);
-			}
-			rms = sqrt((1.0 / AUDIO_DATA_SIZE) * rms);
-
-			if(soundBuffer_ == nullptr && rms > 0.01f)
-			{
-				soundBuffer_ = new SoundBuffer();
-			}
-
-
-			if(rms > 0.01f)
-			{
-				lowRmsSamples_ = 0;
-			}
-			else
-			{
-				lowRmsSamples_ += frameCount;
-			}
-
-			if(soundBuffer_ != nullptr && lowRmsSamples_ > (2 * 48000))
-			{
-				Core::AtomicExchg(&saveBuffer_, 1);
-			}
-
-			// Create and push to sound buffer.
-			if(soundBuffer_ != nullptr)
-			{
-				soundBuffer_->Push(fin[inChannel_], sizeof(f32) * frameCount);
-
-				// If we need to save, kick of a job to delete and finalize.
-				if(Core::AtomicCmpExchg(&saveBuffer_, 0, 1) == 1)
+				f64 rms = 0.0f;
+				const f32* inData = in[0];
+				for(i32 idx = 0; idx < numFrames; ++idx)
 				{
-					if(soundBufferCounter_)
-					{
-						Job::Manager::WaitForCounter(soundBufferCounter_, 0);
-					}
-
-					Job::JobDesc jobDesc;
-					jobDesc.func_ = [](i32 param, void* data) {
-						SoundBuffer* soundBuffer = static_cast<SoundBuffer*>(data);
-						delete soundBuffer;
-					};
-
-					jobDesc.param_ = 0;
-					jobDesc.data_ = soundBuffer_;
-					jobDesc.name_ = "SoundBuffer save";
-					Job::Manager::RunJobs(&jobDesc, 1, &soundBufferCounter_);
-
-					soundBuffer_ = nullptr;
+					rms += (inData[idx] * inData[idx]);
 				}
-			}
+				rms = sqrt((1.0 / numFrames) * rms);
 
-
-			if(statusFlags != 0x0)
-			{
-				Core::Log("Status flags: 0x%x\n", statusFlags);
-			}
-
-			if(fout)
-			{
-				for(i32 idx = 0; idx < (i32)frameCount; ++idx)
+				if(soundBuffer_ == nullptr && rms > 0.01f)
 				{
-					for(i32 ch = 0; ch < outChannels_; ++ch)
-					{
-						fout[ch][idx] = sin((f32)freqTick_);
-					}
-
-					freqTick_ += freq_ / (48000.0 / Core::F32_PIMUL2);
+					soundBuffer_ = new SoundBuffer();
 				}
 
-				if(freqTick_ > Core::F32_PIMUL2)
-					freqTick_ -= Core::F32_PIMUL2;
-			}
 
-			if((audioDataOffset_ + (i32)frameCount) < audioData_.size())
-			{
-				memcpy(audioData_.data() + audioDataOffset_, fin[inChannel_], sizeof(f32) * frameCount);
-				audioDataOffset_ += frameCount;
-			}
-			else
-			{
-				const i32 firstBlock = (audioData_.size() - audioDataOffset_);
-				memcpy(audioData_.data() + audioDataOffset_, fin[inChannel_], sizeof(f32) * firstBlock);
-				audioDataOffset_ = 0;
-				frameCount -= firstBlock;
+				if(rms > 0.01f)
+				{
+					lowRmsSamples_ = 0;
+				}
+				else
+				{
+					lowRmsSamples_ += numFrames;
+				}
+
+				if(soundBuffer_ != nullptr && lowRmsSamples_ > (2 * 48000))
+				{
+					Core::AtomicExchg(&saveBuffer_, 1);
+				}
+
+				// Create and push to sound buffer.
+				if(soundBuffer_ != nullptr)
+				{
+					soundBuffer_->Push(in[0], sizeof(f32) * numFrames);
+
+					// If we need to save, kick of a job to delete and finalize.
+					if(Core::AtomicCmpExchg(&saveBuffer_, 0, 1) == 1)
+					{
+						if(soundBufferCounter_)
+						{
+							Job::Manager::WaitForCounter(soundBufferCounter_, 0);
+						}
+
+						Job::JobDesc jobDesc;
+						jobDesc.func_ = [](i32 param, void* data) {
+							SoundBuffer* soundBuffer = static_cast<SoundBuffer*>(data);
+							delete soundBuffer;
+						};
+
+						jobDesc.param_ = 0;
+						jobDesc.data_ = soundBuffer_;
+						jobDesc.name_ = "SoundBuffer save";
+						Job::Manager::RunJobs(&jobDesc, 1, &soundBufferCounter_);
+
+						soundBuffer_ = nullptr;
+					}
+				}
+
+				if(numOut > 0)
+				{
+					for(i32 idx = 0; idx < (i32)numFrames; ++idx)
+					{
+						for(i32 ch = 0; ch < numOut; ++ch)
+						{
+							out[ch][idx] = sin((f32)freqTick_);
+						}
+
+						freqTick_ += freq_ / (48000.0 / Core::F32_PIMUL2);
+					}
+
+					if(freqTick_ > Core::F32_PIMUL2)
+						freqTick_ -= Core::F32_PIMUL2;
+				}
+
+				if((audioDataOffset_ + (i32)numFrames) < audioData_.size())
+				{
+					memcpy(audioData_.data() + audioDataOffset_, in[0], sizeof(f32) * numFrames);
+					audioDataOffset_ += numFrames;
+				}
+				else
+				{
+					const i32 firstBlock = (audioData_.size() - audioDataOffset_);
+					memcpy(audioData_.data() + audioDataOffset_, in[0], sizeof(f32) * firstBlock);
+					audioDataOffset_ = 0;
+					numFrames -= firstBlock;
 				
-				memcpy(audioData_.data() + audioDataOffset_, fin[inChannel_], sizeof(f32) * frameCount);
-				audioDataOffset_ += frameCount;
+					memcpy(audioData_.data() + audioDataOffset_, in[0], sizeof(f32) * numFrames);
+					audioDataOffset_ += numFrames;
+				}
 			}
-
-			return paContinue;
-		}
-
-		static int StaticStreamCallback(
-		    const void *input, void *output,
-			unsigned long frameCount,
-			const PaStreamCallbackTimeInfo* timeInfo,
-			PaStreamCallbackFlags statusFlags,
-			void *userData )
-		{
-			PortAudio* _this = (PortAudio*)userData;
-			return _this->StreamCallback(input, output, frameCount, timeInfo, statusFlags);
-		}
-
-
-
-		i32 GetNumInputDevices() const
-		{
-			return inputDeviceInfos_.size();
-		}
-
-		i32 GetNumOutputDevices() const
-		{
-			return outputDeviceInfos_.size();
-		}
-
-		const DeviceInfo& GetInputDeviceInfo(i32 idx)
-		{
-			return inputDeviceInfos_[idx];
-		}
-
-		const DeviceInfo& GetOutputDeviceInfo(i32 idx)
-		{
-			return outputDeviceInfos_[idx];
 		}
 
 		const f32* GetAudioData() const
@@ -383,14 +240,6 @@ namespace
 
 
 	private:
-		Core::Vector<DeviceInfo> inputDeviceInfos_;
-		Core::Vector<DeviceInfo> outputDeviceInfos_;
-
-		PaStream* stream_ = nullptr;
-
-		i32 inChannel_ = 0;
-		i32 outChannels_ = 0;
-
 		Core::Array<f32, AUDIO_DATA_SIZE> audioData_;
 		i32 audioDataOffset_ = 0;
 
@@ -411,7 +260,9 @@ namespace
 	public:
 		MainWindow()
 		{
-			portAudio_.Enumerate();
+			audioBackend_.Enumerate();
+
+			LoadSettings();
 		}
 
 		void operator()()
@@ -420,46 +271,49 @@ namespace
 			{
 				if(ImGui::Button("Refresh Devices"))
 				{
-					portAudio_.Enumerate();
+					audioBackend_.Enumerate();
 				}
 
 				Core::Array<const char*, 256> inputDeviceNames;
 				Core::Array<const char*, 256> outputDeviceNames;
-				for(i32 idx = 0; idx < portAudio_.GetNumInputDevices(); ++idx)
+				for(i32 idx = 0; idx < audioBackend_.GetNumInputDevices(); ++idx)
 				{
-					inputDeviceNames[idx] = portAudio_.GetInputDeviceInfo(idx).name_;
+					inputDeviceNames[idx] = audioBackend_.GetInputDeviceInfo(idx).name_;
 				}
-				for(i32 idx = 0; idx < portAudio_.GetNumOutputDevices(); ++idx)
+				for(i32 idx = 0; idx < audioBackend_.GetNumOutputDevices(); ++idx)
 				{
-					outputDeviceNames[idx] = portAudio_.GetOutputDeviceInfo(idx).name_;
+					outputDeviceNames[idx] = audioBackend_.GetOutputDeviceInfo(idx).name_;
 				}
 
-				selectedInputDeviceIdx_ = Core::Min(selectedInputDeviceIdx_, portAudio_.GetNumInputDevices());
-				selectedOutputDeviceIdx_ = Core::Min(selectedOutputDeviceIdx_, portAudio_.GetNumOutputDevices());
+				settings_.inputDevice_ = Core::Min(settings_.inputDevice_, audioBackend_.GetNumInputDevices());
+				settings_.outputDevice_ = Core::Min(settings_.outputDevice_, audioBackend_.GetNumOutputDevices());
 
-				ImGui::ListBox("Inputs", &selectedInputDeviceIdx_, inputDeviceNames.data(), portAudio_.GetNumInputDevices());
-				ImGui::ListBox("Outputs", &selectedOutputDeviceIdx_, outputDeviceNames.data(), portAudio_.GetNumOutputDevices());
+				ImGui::ListBox("Inputs", &settings_.inputDevice_, inputDeviceNames.data(), audioBackend_.GetNumInputDevices());
+				ImGui::ListBox("Outputs", &settings_.outputDevice_, outputDeviceNames.data(), audioBackend_.GetNumOutputDevices());
 
-				if(selectedInputDeviceIdx_ >= 0)
+				if(settings_.inputDevice_ >= 0)
 				{
-					const auto& deviceInfo = portAudio_.GetInputDeviceInfo(selectedInputDeviceIdx_);
-					ImGui::SliderInt("Channel:", &selectedInputChannel_, 0, deviceInfo.maxIn_ - 1);
+					const auto& deviceInfo = audioBackend_.GetInputDeviceInfo(settings_.inputDevice_);
+					ImGui::SliderInt("Channel:", &settings_.inputChannel_, 0, deviceInfo.maxIn_ - 1);
 				}
 				
 				if(ImGui::Button("Start"))
 				{
-					portAudio_.StartDevice(selectedInputDeviceIdx_, selectedOutputDeviceIdx_, selectedInputChannel_);
+					audioBackend_.StartDevice(settings_.inputDevice_, settings_.outputDevice_, AUDIO_DATA_SIZE);
+					audioBackend_.RegisterCallback(&audioCallback_, 1 << settings_.inputChannel_, 0xff);
+
+					SaveSettings();
 				}
 				
 				if(ImGui::Button("Save"))
 				{
-					portAudio_.SaveBuffer();
+					audioCallback_.SaveBuffer();
 				}
 
-				ImGui::PlotLines("Input:", portAudio_.GetAudioData(), AUDIO_DATA_SIZE, portAudio_.GetAudioDataOffset(), nullptr, -1.0f, 1.0f, ImVec2(0.0f, 128.0f));
+				ImGui::PlotLines("Input:", audioCallback_.GetAudioData(), AUDIO_DATA_SIZE, audioCallback_.GetAudioDataOffset(), nullptr, -1.0f, 1.0f, ImVec2(0.0f, 128.0f));
 
 				f64 rms = 0.0f;
-				const f32* inData = portAudio_.GetAudioData();
+				const f32* inData = audioCallback_.GetAudioData();
 				for(i32 idx = 0; idx < AUDIO_DATA_SIZE; ++idx)
 				{
 					rms += (inData[idx] * inData[idx]);
@@ -470,7 +324,7 @@ namespace
 
 				// Perform autocorrelation.
 				Core::Array<f32, AUDIO_DATA_SIZE> acfData;
-				ispc::acf_process(AUDIO_DATA_SIZE, portAudio_.GetAudioData(), acfData.data());
+				ispc::acf_process(AUDIO_DATA_SIZE, audioCallback_.GetAudioData(), acfData.data());
 				i32 largestPeriod = ispc::acf_largest_peak_period(AUDIO_DATA_SIZE, acfData.data());
 				ImGui::PlotLines("ACF:", acfData.data(), AUDIO_DATA_SIZE, 0, nullptr, -2.0f, 2.0f, ImVec2(0.0f, 128.0f));
 
@@ -482,7 +336,7 @@ namespace
 					if(newFreq > 50.0 && newFreq < 2000.0)
 						freq = newFreq;
 
-					
+					audioCallback_.SetOutputFrequency(freq);
 				}
 
 				freq_[freqIdx_] = (f32)freq;
@@ -505,7 +359,7 @@ namespace
 					i32 singleOctaveNote = midiNote % 12;
 
 					singleOctaveNote += 12 * 5;
-					portAudio_.SetOutputFrequency(MidiToFreq(singleOctaveNote));
+					//audioCallback_.SetOutputFrequency(MidiToFreq(singleOctaveNote));
 
 				}
 
@@ -513,16 +367,50 @@ namespace
 			ImGui::End();
 		}
 
+		void SaveSettings()
+		{
+			auto file = Core::File("settings.json", Core::FileFlags::CREATE | Core::FileFlags::WRITE);
+			if(file)
+			{
+				Serialization::Serializer ser(file, Serialization::Flags::TEXT);
+				ser.SerializeObject("settings", settings_);
+			}
+		}
+
+		void LoadSettings()
+		{
+			auto file = Core::File("settings.json", Core::FileFlags::READ);
+			if(file)
+			{
+				Serialization::Serializer ser(file, Serialization::Flags::TEXT);
+				ser.SerializeObject("settings", settings_);
+			}
+		}
 
 	private:
-		PortAudio portAudio_;
+		AudioBackend audioBackend_;
+
+		TestAudioCallback audioCallback_;
 
 		Core::Array<f32, 1024> freq_;
 		i32 freqIdx_ = 0;
 		
-		int selectedInputDeviceIdx_ = 0;
-		int selectedInputChannel_ = 0;
-		int selectedOutputDeviceIdx_ = 0;
+		struct Settings
+		{
+			i32 inputDevice_ = 0;
+			i32 outputDevice_ = 0;
+			i32 inputChannel_ = 0;
+
+			bool Serialize(Serialization::Serializer& ser)
+			{
+				ser.Serialize("inputDevice", inputDevice_);
+				ser.Serialize("outputDevice", outputDevice_);
+				ser.Serialize("inputChannel", inputChannel_);
+				return true;
+			}
+		};
+
+		Settings settings_;
 	};
 
 }
@@ -539,7 +427,7 @@ int main(int argc, char* const argv[])
 
 
 	Client::Manager::Scoped clientManager;
-	Client::Window window("sandbox_app", 100, 100, 1024, 768, true);
+	Client::Window window("Music Practice App", 100, 100, 1024, 768, true);
 
 	Plugin::Manager::Scoped pluginManager;
 	Job::Manager::Scoped jobManager(4, 256, 256 * 1024);

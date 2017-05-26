@@ -4,6 +4,8 @@ INCLUDE_DIRECTORIES(
 
 
 SET(SOURCES
+	"audio_backend.h"
+	"audio_backend.cpp"
 	"main.cpp"
 	"note.h"
 	"note.cpp"
@@ -14,10 +16,6 @@ SET(SOURCES_ISPC
 )
 
 # Add sandbox_app.
-ADD_ISPC_EXECUTABLE(music_app ${SOURCES} ${SOURCES_ISPC})
-TARGET_LINK_LIBRARIES(music_app graphics imgui portaudio_static)
-
-SET_TARGET_PROPERTIES(music_app PROPERTIES FOLDER App)
-SOURCE_GROUP("Source" FILES ${SOURCES})
-SOURCE_GROUP("ISPC" FILES ${SOURCES_ISPC})
+ADD_ENGINE_EXECUTABLE(music_app ${SOURCES} ${SOURCES_ISPC})
+TARGET_LINK_LIBRARIES(music_app graphics imgui serialization portaudio_static)
 

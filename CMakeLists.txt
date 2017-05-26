@@ -19,6 +19,8 @@ SET(ISPC_TARGETS avx2)
 SET(ENABLE_ISPC_SUPPORT YES)
 INCLUDE(ispc)
 
+INCLUDE(projects)
+
 PROJECT(music_app CXX)
 
 ADD_SUBDIRECTORY("3rdparty/portaudio")
