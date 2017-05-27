@@ -316,4 +316,18 @@ namespace Sound
 	{
 		Wav::Save(file, soundData);
 	}
+
+	void Save(Core::File& rawFile, Core::File& outFile, Format format, i32 numChannels, i32 sampleRate)
+	{
+		Sound::SoundData soundData;
+		soundData.numChannels_ = 1;
+		soundData.sampleRate_ = 48000;
+		soundData.format_ = Sound::Format::F32;
+		soundData.numBytes_ = (u32)rawFile.Size();
+		soundData.rawData_ = new u8[soundData.numBytes_];
+		rawFile.Read(soundData.rawData_, soundData.numBytes_);
+		soundData.numSamples_ = soundData.numBytes_ / (soundData.numChannels_ * sizeof(f32));
+		Sound::Save(outFile, soundData);
+	}
+
 } // namespace Sound

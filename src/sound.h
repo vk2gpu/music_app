@@ -45,4 +45,9 @@ namespace Sound
 	 */
 	void Save(Core::File& file, const SoundData& soundData);
 
+	/**
+	 * Save a sound from raw.
+	 */
+	void Save(Core::File& rawFile, Core::File& outFile, Format format, i32 numChannels, i32 sampleRate);
+
 } // namespace Sound

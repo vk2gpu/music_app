@@ -30,6 +30,53 @@ namespace
 		return setupParams;
 	}
 
+	void SaveSoundAsync(const char* rawFilename, const char* outFilename, Sound::Format format, i32 numChannels, i32 sampleRate)
+	{
+		struct Params
+		{
+			Core::Array<char, Core::MAX_PATH_LENGTH> inFilename_;
+			Core::Array<char, Core::MAX_PATH_LENGTH> outFilename_;
+			Sound::Format format_;
+			i32 numChannels_;
+			i32 sampleRate_;
+		};
+
+		auto* params = new Params;
+		strcpy_s(params->inFilename_.data(), params->inFilename_.size(), rawFilename);
+		strcpy_s(params->outFilename_.data(), params->outFilename_.size(), outFilename);
+		params->format_ = format;
+		params->numChannels_ = numChannels;
+		params->sampleRate_ = sampleRate;
+
+		Job::JobDesc jobDesc;
+		jobDesc.func_ = [](i32 param, void* data) {
+			Params* params = static_cast<Params*>(data);
+				
+			auto inFile = Core::File(params->inFilename_.data(), Core::FileFlags::READ);
+			if(inFile)
+			{
+				if(Core::FileExists(params->outFilename_.data()))
+				{
+					Core::FileRemove(params->outFilename_.data());
+				}
+
+				auto outFile = Core::File(params->outFilename_.data(), Core::FileFlags::CREATE | Core::FileFlags::WRITE);
+				Sound::Save(inFile, outFile, params->format_, params->numChannels_, params->sampleRate_);
+
+				std::swap(inFile, Core::File());
+				if(Core::FileExists(params->inFilename_.data()))
+				{
+					Core::FileRemove(params->inFilename_.data());
+				}
+			}
+
+			delete params;
+		};
+		jobDesc.data_ = params;
+		jobDesc.name_ = "Save file to wav";
+		Job::Manager::RunJobs(&jobDesc, 1);
+	}
+
 
 	class SoundBuffer
 	{
@@ -61,51 +108,7 @@ namespace
 				Job::Manager::WaitForCounter(flushCounter_, 0);
 			}
 
-			// Kick off save job in background after destruction.
-			struct Params
-			{
-				Core::Array<char, Core::MAX_PATH_LENGTH> inFilename_;
-				Core::Array<char, Core::MAX_PATH_LENGTH> outFilename_;
-			};
-
-			auto* params = new Params;
-			params->inFilename_ = flushFileName_;
-			params->outFilename_ = saveFileName_;
-
-			Job::JobDesc jobDesc;
-			jobDesc.func_ = [](i32 param, void* data) {
-				Params* params = static_cast<Params*>(data);
-				
-				auto inFile = Core::File(params->inFilename_.data(), Core::FileFlags::READ);
-				if(inFile)
-				{
-					Sound::SoundData soundData;
-					soundData.numChannels_ = 1;
-					soundData.sampleRate_ = 48000;
-					soundData.format_ = Sound::Format::F32;
-					soundData.numBytes_ = inFile.Size();
-					soundData.rawData_ = new u8[soundData.numBytes_];
-					inFile.Read(soundData.rawData_, soundData.numBytes_);
-					soundData.numSamples_ = soundData.numBytes_ / (soundData.numChannels_ * sizeof(f32));
-
-					if(Core::FileExists(params->outFilename_.data()))
-					{
-						Core::FileRemove(params->outFilename_.data());
-					}
-
-					auto outFile = Core::File(params->outFilename_.data(), Core::FileFlags::CREATE | Core::FileFlags::WRITE);
-					Sound::Save(outFile, soundData);
-
-					std::swap(inFile, Core::File());
-					if(Core::FileExists(params->inFilename_.data()))
-					{
-						Core::FileRemove(params->inFilename_.data());
-					}
-				}				
-			};
-			jobDesc.data_ = params;
-			jobDesc.name_ = "Save file to wav";
-			Job::Manager::RunJobs(&jobDesc, 1);
+			SaveSoundAsync(flushFileName_.data(), saveFileName_.data(), Sound::Format::F32, 1, 48000);
 		}
 
 		void FlushData()
