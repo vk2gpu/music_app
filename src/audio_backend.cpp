@@ -5,6 +5,8 @@
 #include "core/misc.h"
 #include "core/vector.h"
 
+#include "ispc/clipping_ispc.h"
+
 #include <portaudio.h>
 
 #include <algorithm>
@@ -71,98 +73,11 @@ static int StaticStreamCallback(
 		callback.callback_->OnAudioCallback(callbackIn, callbackOut, impl_->inStreams_.data(), impl_->outStreams_.data(), frameCount);
 	}
 
-
-#if 0
-	// If RMS is over a certain amount, create a sound buffer.
-	f64 rms = 0.0f;
-	const f32* inData = fin[inChannel_];
-	for(i32 idx = 0; idx < AUDIO_DATA_SIZE; ++idx)
+	// Perform clipping.
+	for(i32 out = 0; out < outChannels; ++out)
 	{
-		rms += (inData[idx] * inData[idx]);
+		ispc::clipping_hard(impl_->outStreams_[out], impl_->outStreams_[out], frameCount);
 	}
-	rms = sqrt((1.0 / AUDIO_DATA_SIZE) * rms);
-
-	if(soundBuffer_ == nullptr && rms > 0.01f)
-	{
-		soundBuffer_ = new SoundBuffer();
-	}
-
-
-	if(rms > 0.01f)
-	{
-		lowRmsSamples_ = 0;
-	}
-	else
-	{
-		lowRmsSamples_ += frameCount;
-	}
-
-	if(soundBuffer_ != nullptr && lowRmsSamples_ > (2 * 48000))
-	{
-		Core::AtomicExchg(&saveBuffer_, 1);
-	}
-
-	// Create and push to sound buffer.
-	if(soundBuffer_ != nullptr)
-	{
-		soundBuffer_->Push(fin[inChannel_], sizeof(f32) * frameCount);
-
-		// If we need to save, kick of a job to delete and finalize.
-		if(Core::AtomicCmpExchg(&saveBuffer_, 0, 1) == 1)
-		{
-			if(soundBufferCounter_)
-			{
-				Job::Manager::WaitForCounter(soundBufferCounter_, 0);
-			}
-
-			Job::JobDesc jobDesc;
-			jobDesc.func_ = [](i32 param, void* data) {
-				SoundBuffer* soundBuffer = static_cast<SoundBuffer*>(data);
-				delete soundBuffer;
-			};
-
-			jobDesc.param_ = 0;
-			jobDesc.data_ = soundBuffer_;
-			jobDesc.name_ = "SoundBuffer save";
-			Job::Manager::RunJobs(&jobDesc, 1, &soundBufferCounter_);
-
-			soundBuffer_ = nullptr;
-		}
-	}
-
-
-	if(fout)
-	{
-		for(i32 idx = 0; idx < (i32)frameCount; ++idx)
-		{
-			for(i32 ch = 0; ch < outChannels_; ++ch)
-			{
-				fout[ch][idx] = sin((f32)freqTick_);
-			}
-
-			freqTick_ += freq_ / (48000.0 / Core::F32_PIMUL2);
-		}
-
-		if(freqTick_ > Core::F32_PIMUL2)
-			freqTick_ -= Core::F32_PIMUL2;
-	}
-
-	if((audioDataOffset_ + (i32)frameCount) < audioData_.size())
-	{
-		memcpy(audioData_.data() + audioDataOffset_, fin[inChannel_], sizeof(f32) * frameCount);
-		audioDataOffset_ += frameCount;
-	}
-	else
-	{
-		const i32 firstBlock = (audioData_.size() - audioDataOffset_);
-		memcpy(audioData_.data() + audioDataOffset_, fin[inChannel_], sizeof(f32) * firstBlock);
-		audioDataOffset_ = 0;
-		frameCount -= firstBlock;
-				
-		memcpy(audioData_.data() + audioDataOffset_, fin[inChannel_], sizeof(f32) * frameCount);
-		audioDataOffset_ += frameCount;
-	}
-#endif
 
 	return paContinue;
 }
@@ -252,8 +167,9 @@ void AudioBackend::StartDevice(i32 in, i32 out, i32 bufferSize)
 	impl_->inStreams_.resize(impl_->inChannels_);
 	impl_->outStreams_.resize(impl_->outChannels_);
 
-	Pa_OpenStream(&impl_->stream_, &inParams, &outParams, 48000.0, bufferSize, paNoFlag, StaticStreamCallback, impl_);
-	Pa_StartStream(impl_->stream_);
+	PaError err;
+	err = Pa_OpenStream(&impl_->stream_, &inParams, &outParams, 48000.0, bufferSize, paClipOff | paDitherOff, StaticStreamCallback, impl_);
+	err = Pa_StartStream(impl_->stream_);
 }
 
 i32 AudioBackend::GetNumInputDevices() const

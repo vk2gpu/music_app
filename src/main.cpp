@@ -18,11 +18,15 @@
 #include "audio_backend.h"
 
 #include "ispc/acf_ispc.h"
+#include "ispc/biquad_filter_ispc.h"
 #include "note.h"
 #include "sound.h"
 
 namespace
 {
+	AudioBackend audioBackend_;
+
+
 	GPU::SetupParams GetDefaultSetupParams()
 	{
 		GPU::SetupParams setupParams;
@@ -171,11 +175,19 @@ namespace
 
 	volatile i32 SoundBuffer::SoundBufferID = 0;
 	
-	static const i32 AUDIO_DATA_SIZE = 512;
+	static const i32 AUDIO_DATA_SIZE = 2048;
 
 	class TestAudioCallback : public IAudioCallback
 	{
 	public:
+		TestAudioCallback()
+		{
+			lp_ = ispc::biquad_filter_passthrough();
+			hp_ = ispc::biquad_filter_passthrough();
+			memset(lpb_.data(), 0, sizeof(lpb_));
+			memset(hpb_.data(), 0, sizeof(hpb_));
+		}
+
 		void OnAudioCallback(i32 numIn, i32 numOut, const f32** in, f32** out, i32 numFrames) override
 		{
 			// If RMS is over a certain amount, create a sound buffer.
@@ -238,34 +250,27 @@ namespace
 				}
 
 				if(numOut > 0)
-				{
-					for(i32 idx = 0; idx < (i32)numFrames; ++idx)
+				{	
+					for(int i = 0; i < numOut; ++i)
 					{
-						for(i32 ch = 0; ch < numOut; ++ch)
-						{
-							out[ch][idx] = sin((f32)freqTick_);
-						}
-
-						freqTick_ += freq_ / (48000.0 / Core::F32_PIMUL2);
+						ispc::biquad_filter_process(&lp_, &lpb_[i], in[0], out[i], numFrames);
+						ispc::biquad_filter_process(&hp_, &hpb_[i], out[i], out[i], numFrames);
 					}
-
-					if(freqTick_ > Core::F32_PIMUL2)
-						freqTick_ -= Core::F32_PIMUL2;
 				}
 
 				if((audioDataOffset_ + (i32)numFrames) < audioData_.size())
 				{
-					memcpy(audioData_.data() + audioDataOffset_, in[0], sizeof(f32) * numFrames);
+					memcpy(audioData_.data() + audioDataOffset_, out[0], sizeof(f32) * numFrames);
 					audioDataOffset_ += numFrames;
 				}
 				else
 				{
 					const i32 firstBlock = (audioData_.size() - audioDataOffset_);
-					memcpy(audioData_.data() + audioDataOffset_, in[0], sizeof(f32) * firstBlock);
+					memcpy(audioData_.data() + audioDataOffset_, out[0], sizeof(f32) * firstBlock);
 					audioDataOffset_ = 0;
 					numFrames -= firstBlock;
 				
-					memcpy(audioData_.data() + audioDataOffset_, in[0], sizeof(f32) * numFrames);
+					memcpy(audioData_.data() + audioDataOffset_, out[0], sizeof(f32) * numFrames);
 					audioDataOffset_ += numFrames;
 				}
 			}
@@ -291,8 +296,6 @@ namespace
 			Core::AtomicExchg(&saveBuffer_, 1);
 		}
 
-
-	private:
 		Core::Array<f32, AUDIO_DATA_SIZE> audioData_;
 		i32 audioDataOffset_ = 0;
 
@@ -305,7 +308,12 @@ namespace
 		i32 lowRmsSamples_ = 0;
 
 		volatile i32 saveBuffer_ = 0;
-		
+
+		ispc::BiquadCoeff lp_;
+		ispc::BiquadCoeff hp_;
+
+		Core::Array<ispc::BiquadBuffer, 8> lpb_;
+		Core::Array<ispc::BiquadBuffer, 8> hpb_;	
 	};
 
 	class MainWindow
@@ -316,6 +324,11 @@ namespace
 			audioBackend_.Enumerate();
 
 			LoadSettings();
+		}
+
+		~MainWindow()
+		{
+			audioBackend_.UnregisterCallback(&audioCallback_);
 		}
 
 		void operator()()
@@ -365,6 +378,13 @@ namespace
 
 				ImGui::PlotLines("Input:", audioCallback_.GetAudioData(), AUDIO_DATA_SIZE, audioCallback_.GetAudioDataOffset(), nullptr, -1.0f, 1.0f, ImVec2(0.0f, 128.0f));
 
+				static f32 lp = 20000.0f;
+				static f32 hp = 10.0f;
+				ImGui::SliderFloat("LP:", &lp, 10.0f, 20000.0f);
+				ImGui::SliderFloat("HP:", &hp, 10.0f, 20000.0f);
+				audioCallback_.lp_ = ispc::biquad_filter_lowpass(48000.0f, lp, 0.0f);
+				audioCallback_.hp_ = ispc::biquad_filter_highpass(48000.0f, hp, 0.0f);
+
 				f64 rms = 0.0f;
 				const f32* inData = audioCallback_.GetAudioData();
 				for(i32 idx = 0; idx < AUDIO_DATA_SIZE; ++idx)
@@ -407,15 +427,6 @@ namespace
 				MidiToString(midiNote, note, sizeof(note));
 				ImGui::Text("Note: %s (%d)", note, midiNote);
 
-				if(midiNote >= 0 && midiNote <= 127)
-				{
-					i32 singleOctaveNote = midiNote % 12;
-
-					singleOctaveNote += 12 * 5;
-					//audioCallback_.SetOutputFrequency(MidiToFreq(singleOctaveNote));
-
-				}
-
 			}
 			ImGui::End();
 		}
@@ -441,8 +452,6 @@ namespace
 		}
 
 	private:
-		AudioBackend audioBackend_;
-
 		TestAudioCallback audioCallback_;
 
 		Core::Array<f32, 1024> freq_;
