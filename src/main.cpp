@@ -19,6 +19,7 @@
 
 #include "ispc/acf_ispc.h"
 #include "note.h"
+#include "sound.h"
 
 namespace
 {
@@ -40,6 +41,7 @@ namespace
 		{
 			u32 soundBufferID = Core::AtomicInc(&SoundBufferID);
 			sprintf_s(flushFileName_.data(), flushFileName_.size(), "temp_audio_out_%08u.raw", soundBufferID);
+			sprintf_s(saveFileName_.data(), saveFileName_.size(), "audio_out_%08u.wav", soundBufferID);
 
 			buffer_.resize(FLUSH_SIZE);
 			flushBuffer_.resize(FLUSH_SIZE);
@@ -53,10 +55,57 @@ namespace
 		~SoundBuffer()
 		{
 			FlushData();
+
 			if(flushCounter_)
 			{
 				Job::Manager::WaitForCounter(flushCounter_, 0);
 			}
+
+			// Kick off save job in background after destruction.
+			struct Params
+			{
+				Core::Array<char, Core::MAX_PATH_LENGTH> inFilename_;
+				Core::Array<char, Core::MAX_PATH_LENGTH> outFilename_;
+			};
+
+			auto* params = new Params;
+			params->inFilename_ = flushFileName_;
+			params->outFilename_ = saveFileName_;
+
+			Job::JobDesc jobDesc;
+			jobDesc.func_ = [](i32 param, void* data) {
+				Params* params = static_cast<Params*>(data);
+				
+				auto inFile = Core::File(params->inFilename_.data(), Core::FileFlags::READ);
+				if(inFile)
+				{
+					Sound::SoundData soundData;
+					soundData.numChannels_ = 1;
+					soundData.sampleRate_ = 48000;
+					soundData.format_ = Sound::Format::F32;
+					soundData.numBytes_ = inFile.Size();
+					soundData.rawData_ = new u8[soundData.numBytes_];
+					inFile.Read(soundData.rawData_, soundData.numBytes_);
+					soundData.numSamples_ = soundData.numBytes_ / (soundData.numChannels_ * sizeof(f32));
+
+					if(Core::FileExists(params->outFilename_.data()))
+					{
+						Core::FileRemove(params->outFilename_.data());
+					}
+
+					auto outFile = Core::File(params->outFilename_.data(), Core::FileFlags::CREATE | Core::FileFlags::WRITE);
+					Sound::Save(outFile, soundData);
+
+					std::swap(inFile, Core::File());
+					if(Core::FileExists(params->inFilename_.data()))
+					{
+						Core::FileRemove(params->inFilename_.data());
+					}
+				}				
+			};
+			jobDesc.data_ = params;
+			jobDesc.name_ = "Save file to wav";
+			Job::Manager::RunJobs(&jobDesc, 1);
 		}
 
 		void FlushData()
@@ -111,9 +160,10 @@ namespace
 		Core::File flushFile_;
 		/// Flush file name.
 		Core::Array<char, Core::MAX_PATH_LENGTH> flushFileName_;
+		/// Save file name.
+		Core::Array<char, Core::MAX_PATH_LENGTH> saveFileName_;
 		/// Flush job counter to wait until flushing to disk has completed.
 		Job::Counter* flushCounter_ = nullptr; 
-
 	};
 
 	volatile i32 SoundBuffer::SoundBufferID = 0;
