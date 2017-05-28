@@ -6,13 +6,27 @@ INCLUDE_DIRECTORIES(
 
 
 SET(SOURCES
-	"audio_backend.h"
-	"audio_backend.cpp"
+	"main.cpp"
+	"settings.h"
+	"settings.cpp"
+)
+
+SET(SOURCES_GUI
+	"gui.h"
+	"gui.cpp"
 	"dialog_device_selection.h"
 	"dialog_device_selection.cpp"
-	"main.cpp"
+)
+
+SET(SOURCES_BACKEND
+	"audio_backend.h"
+	"audio_backend.cpp"
 	"midi_backend.h"
 	"midi_backend.cpp"
+)
+
+SET(SOURCES_UTILITY
+	"midi.h"
 	"note.h"
 	"note.cpp"
 	"sound.h"
@@ -27,6 +41,10 @@ SET(SOURCES_ISPC
 )
 
 # Add music_app.
-ADD_ENGINE_EXECUTABLE(music_app ${SOURCES} ${SOURCES_ISPC})
+ADD_ENGINE_EXECUTABLE(music_app ${SOURCES} ${SOURCES_GUI} ${SOURCES_BACKEND} ${SOURCES_UTILITY} ${SOURCES_ISPC})
 TARGET_LINK_LIBRARIES(music_app graphics imgui serialization portaudio_static portmidi-static)
 
+SOURCE_GROUP("Source" FILES ${SOURCES})
+SOURCE_GROUP("Source\\GUI" FILES ${SOURCES_GUI})
+SOURCE_GROUP("Source\\Backend" FILES ${SOURCES_BACKEND})
+SOURCE_GROUP("Source\\Utility" FILES ${SOURCES_UTILITY})

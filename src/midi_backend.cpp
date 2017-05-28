@@ -9,26 +9,6 @@
 #include <algorithm>
 
 
-void MidiDeviceSettings::Save()
-{
-	auto file = Core::File("midi_settings.json", Core::FileFlags::WRITE);
-	if(file)
-	{
-		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
-		ser.SerializeObject("midi_settings", *this);
-	}
-}
-
-void MidiDeviceSettings::Load()
-{
-	auto file = Core::File("midi_settings.json", Core::FileFlags::READ);
-	if(file)
-	{
-		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
-		ser.SerializeObject("midi_settings", *this);
-	}
-}
-
 struct MidiBackendImpl
 {
 	Core::Vector<MidiDeviceInfo> inputDeviceInfos_;

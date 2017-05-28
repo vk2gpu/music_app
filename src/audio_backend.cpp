@@ -12,27 +12,6 @@
 
 #include <algorithm>
 
-void AudioDeviceSettings::Save()
-{
-	auto file = Core::File("audio_settings.json", Core::FileFlags::WRITE);
-	if(file)
-	{
-		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
-		ser.SerializeObject("audio_settings", *this);
-	}
-}
-
-void AudioDeviceSettings::Load()
-{
-	auto file = Core::File("audio_settings.json", Core::FileFlags::READ);
-	if(file)
-	{
-		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
-		ser.SerializeObject("audio_settings", *this);
-	}
-}
-
-
 struct AudioBackendImpl
 {
 	Core::Vector<AudioDeviceInfo> inputDeviceInfos_;

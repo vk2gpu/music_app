@@ -2,6 +2,7 @@
 #include "dialog_device_selection.h"
 #include "midi_backend.h"
 #include "note.h"
+#include "settings.h"
 #include "sound.h"
 
 #include "ispc/acf_ispc.h"
@@ -29,7 +30,7 @@ namespace
 {
 	AudioBackend audioBackend_;
 	MidiBackend midiBackend_;
-	AudioDeviceSettings audioDeviceSettings_;
+	App::Settings settings_;
 
 	GPU::SetupParams GetDefaultSetupParams()
 	{
@@ -116,7 +117,7 @@ namespace
 				Job::Manager::WaitForCounter(flushCounter_, 0);
 			}
 
-			SaveSoundAsync(flushFileName_.data(), saveFileName_.data(), Sound::Format::F32, 1, audioDeviceSettings_.sampleRate_);
+			SaveSoundAsync(flushFileName_.data(), saveFileName_.data(), Sound::Format::F32, 1, settings_.audioSettings_.sampleRate_);
 		}
 
 		void FlushData()
@@ -253,7 +254,7 @@ namespace
 					lowMaxSamples_ += numFrames;
 				}
 
-				if(soundBuffer_ != nullptr && lowMaxSamples_ > (2 * audioDeviceSettings_.sampleRate_))
+				if(soundBuffer_ != nullptr && lowMaxSamples_ > (2 * settings_.audioSettings_.sampleRate_))
 				{
 					Core::AtomicExchg(&saveBuffer_, 1);
 				}
@@ -394,14 +395,14 @@ namespace
 	{
 	public:
 		MainWindow()
-			: dialogDeviceSelection_(audioBackend_, audioDeviceSettings_)
+			: dialogDeviceSelection_(audioBackend_, settings_.audioSettings_)
 			, audioRecordingCallback_(audioStatsCallback_)
 		{
 			audioBackend_.RegisterCallback(&audioStatsCallback_, 0x1, 0x0);
 			audioBackend_.RegisterCallback(&audioRecordingCallback_, 0x1, 0x0);
 			audioBackend_.RegisterCallback(&audioCallback_, 0x1, 0xff);
 			
-			if(audioBackend_.StartDevice(audioDeviceSettings_))
+			if(audioBackend_.StartDevice(settings_.audioSettings_))
 			{
 				deviceSelectionStatus_ = DeviceSelectionStatus::SELECTED;
 			}
@@ -451,8 +452,8 @@ namespace
 				deviceSelectionStatus_ = dialogDeviceSelection_.Update();
 				if(deviceSelectionStatus_ == DeviceSelectionStatus::SELECTED)
 				{
-					audioDeviceSettings_ = dialogDeviceSelection_.GetSettings();
-					audioDeviceSettings_.Save();
+					settings_.audioSettings_ = dialogDeviceSelection_.GetSettings();
+					settings_.Save();
 				}
 			}
 			else
@@ -467,8 +468,8 @@ namespace
 					static f32 hp = 10.0f;
 					ImGui::SliderFloat("LP", &lp, 10.0f, 20000.0f);
 					ImGui::SliderFloat("HP", &hp, 10.0f, 20000.0f);
-					audioCallback_.lp_ = ispc::biquad_filter_lowpass(audioDeviceSettings_.sampleRate_, lp, 0.0f);
-					audioCallback_.hp_ = ispc::biquad_filter_highpass(audioDeviceSettings_.sampleRate_, hp, 0.0f);
+					audioCallback_.lp_ = ispc::biquad_filter_lowpass(settings_.audioSettings_.sampleRate_, lp, 0.0f);
+					audioCallback_.hp_ = ispc::biquad_filter_highpass(settings_.audioSettings_.sampleRate_, hp, 0.0f);
 
 					
 					f32 rms = audioStatsCallback_.rms_;
@@ -525,12 +526,8 @@ int main(int argc, char* const argv[])
 		Core::FileChangeDir(path);
 	}
 
-	// Enumerate backend.
-	audioBackend_.Enumerate();
-	midiBackend_.Enumerate();
-
 	// Load settings.
-	audioDeviceSettings_.Load();
+	settings_.Load();
 
 	Client::Manager::Scoped clientManager;
 	Client::Window window("Music Practice App", 100, 100, 1024, 768, true);

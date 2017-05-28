@@ -5,7 +5,7 @@
 #include "core/array.h"
 #include "core/file.h"
 #include "core/misc.h"
-#include "imgui/manager.h"
+#include "gui.h"
 
 namespace
 {
@@ -104,29 +104,15 @@ DeviceSelectionStatus DialogDeviceSelection::Update()
 		inputDeviceIdx_ = Core::Min(inputDeviceIdx_, audioBackend_.GetNumInputDevices());
 		outputDeviceIdx_ = Core::Min(outputDeviceIdx_, audioBackend_.GetNumOutputDevices());
 
-		ImGui::PushItemWidth(ImGui::GetWindowSize().x - 6.0f);
-		ImGui::PushID("Input");
-		ImGui::LabelText("", "Inputs:");
-		ImGui::ListBox("", &inputDeviceIdx_, inputDeviceNames.data(), audioBackend_.GetNumInputDevices(), 8);
-		ImGui::PopID();
+		{
+			Gui::ScopedItemWidth scopedItemWidth(ImGui::GetWindowSize().x - 6.0f);
 
-		ImGui::PushID("Output");
-		ImGui::LabelText("", "Outputs:");
-		
-		ImGui::ListBox("", &outputDeviceIdx_, outputDeviceNames.data(), audioBackend_.GetNumOutputDevices(), 8);
-		ImGui::PopID();
+			Gui::ListBox("Inputs:", &inputDeviceIdx_, inputDeviceNames.data(), audioBackend_.GetNumInputDevices(), 8);
+			Gui::ListBox("Outputs:", &outputDeviceIdx_, outputDeviceNames.data(), audioBackend_.GetNumOutputDevices(), 8);
 
-		ImGui::PushID("SampleRate");
-		ImGui::LabelText("", "Sample Rate:");
-		ImGui::Combo("", &sampleRateIdx_, sampleRateStrs, 3);				
-		ImGui::PopID();
-
-		ImGui::PushID("BufferSize");
-		ImGui::LabelText("", "Buffer Size:");
-		ImGui::Combo("", &bufferSizeIdx_, bufferSizeStrs, 4);
-		ImGui::PopID();
-
-		ImGui::PopItemWidth();
+			Gui::Combo("Sample Rate:", &sampleRateIdx_, sampleRateStrs, 3);				
+			Gui::Combo("Buffer Size:", &bufferSizeIdx_, bufferSizeStrs, 4);
+		}
 
 		if(ImGui::Button("Start"))
 		{

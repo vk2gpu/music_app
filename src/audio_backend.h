@@ -23,9 +23,6 @@ struct AudioDeviceSettings
 	i32 bufferSize_ = 1024;
 	i32 sampleRate_ = 48000;
 
-	void Save();
-	void Load();
-
 	bool Serialize(Serialization::Serializer& ser)
 	{
 		ser.Serialize("inputDevice", inputDevice_);

@@ -21,9 +21,6 @@ struct MidiDeviceSettings
 	Core::UUID inputDevice_;
 	Core::UUID outputDevice_;
 
-	void Save();
-	void Load();
-
 	bool Serialize(Serialization::Serializer& ser)
 	{
 		ser.Serialize("inputDevice", inputDevice_);
