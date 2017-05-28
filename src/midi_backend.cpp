@@ -11,7 +11,7 @@
 
 void MidiDeviceSettings::Save()
 {
-	auto file = Core::File("midi_settings.json", Core::FileFlags::WRITE);
+	auto file = Core::File("midi_settings.json", Core::FileFlags::CREATE | Core::FileFlags::WRITE);
 	if(file)
 	{
 		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
