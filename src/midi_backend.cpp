@@ -90,10 +90,10 @@ void MidiBackend::Enumerate()
 	for(auto& device : impl_->outputDeviceInfos_)
 		device.idx_ = idx++;
 
+#if 0
 	MidiDeviceSettings settings;
 	settings.inputDevice_ = impl_->inputDeviceInfos_[2].uuid_;
 
-#if 0
 	StartDevice(settings);
 
 	PmEvent event;
