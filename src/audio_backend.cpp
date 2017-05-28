@@ -14,7 +14,7 @@
 
 void AudioDeviceSettings::Save()
 {
-	auto file = Core::File("audio_settings.json", Core::FileFlags::READ);
+	auto file = Core::File("audio_settings.json", Core::FileFlags::WRITE);
 	if(file)
 	{
 		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
