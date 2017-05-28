@@ -8,7 +8,6 @@
 
 #include <algorithm>
 
-
 struct MidiBackendImpl
 {
 	Core::Vector<MidiDeviceInfo> inputDeviceInfos_;
