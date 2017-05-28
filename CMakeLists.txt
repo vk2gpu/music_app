@@ -24,6 +24,10 @@ INCLUDE(projects)
 
 PROJECT(music_app CXX)
 
+SET(PA_USE_WMME OFF)
+SET(PA_USE_WDMKS OFF)
+SET(PA_USE_DS OFF)
+
 ADD_SUBDIRECTORY("3rdparty/portaudio")
 SET_TARGET_PROPERTIES(portaudio PROPERTIES FOLDER "3rdparty/portaudio")
 SET_TARGET_PROPERTIES(portaudio_static PROPERTIES FOLDER "3rdparty/portaudio")

@@ -1,15 +1,41 @@
 #pragma once
 
 #include "core/types.h"
+#include "core/uuid.h"
+#include "serialization/serializer.h"
 
 struct AudioDeviceInfo
 {
 	char name_[256] = {0};
-	char backend_[256] = {0};
-	i32 deviceIdx_ = 0;
+	Core::UUID uuid_;
+	i32 idx_ = 0;
 	i32 maxIn_ = 0;
 	i32 maxOut_ = 0;
+
+	/// Portaudio specific.
+	i32 deviceIdx_ = 0;
 };
+
+struct AudioDeviceSettings
+{
+	Core::UUID inputDevice_;
+	Core::UUID outputDevice_;
+	i32 bufferSize_ = 1024;
+	i32 sampleRate_ = 48000;
+
+	void Save();
+	void Load();
+
+	bool Serialize(Serialization::Serializer& ser)
+	{
+		ser.Serialize("inputDevice", inputDevice_);
+		ser.Serialize("outputDevice", outputDevice_);
+		ser.Serialize("bufferSize", bufferSize_);
+		ser.Serialize("sampleRate", sampleRate_);
+		return true;
+	}
+};
+
 
 class IAudioCallback
 {
@@ -33,12 +59,15 @@ public:
 	AudioBackend();
 	~AudioBackend();
 	void Enumerate();
-	void StartDevice(i32 in, i32 out, i32 bufferSize);
+	bool StartDevice(const AudioDeviceSettings& settings);
 
 	i32 GetNumInputDevices() const;
 	i32 GetNumOutputDevices() const;
 	const AudioDeviceInfo& GetInputDeviceInfo(i32 idx);
 	const AudioDeviceInfo& GetOutputDeviceInfo(i32 idx);
+	const AudioDeviceInfo* GetInputDeviceInfo(const Core::UUID& uuid);
+	const AudioDeviceInfo* GetOutputDeviceInfo(const Core::UUID& uuid);
+	
 
 	bool RegisterCallback(IAudioCallback* callback, u32 inMask, u32 outMask);
 	void UnregisterCallback(IAudioCallback* callback);

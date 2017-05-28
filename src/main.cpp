@@ -1,3 +1,11 @@
+#include "audio_backend.h"
+#include "dialog_device_selection.h"
+#include "note.h"
+#include "sound.h"
+
+#include "ispc/acf_ispc.h"
+#include "ispc/biquad_filter_ispc.h"
+
 #include "client/manager.h"
 #include "client/window.h"
 #include "core/array.h"
@@ -10,22 +18,14 @@
 #include "job/manager.h"
 #include "imgui/manager.h"
 #include "plugin/manager.h"
-#include "serialization/serializer.h"
 
 #include <algorithm>
 #include <utility>
 
-#include "audio_backend.h"
-
-#include "ispc/acf_ispc.h"
-#include "ispc/biquad_filter_ispc.h"
-#include "note.h"
-#include "sound.h"
-
 namespace
 {
 	AudioBackend audioBackend_;
-
+	AudioDeviceSettings audioDeviceSettings_;
 
 	GPU::SetupParams GetDefaultSetupParams()
 	{
@@ -258,20 +258,21 @@ namespace
 					}
 				}
 
+				i32 audioDataFrames = Core::Min(audioData_.size(), numFrames);
 				if((audioDataOffset_ + (i32)numFrames) < audioData_.size())
 				{
-					memcpy(audioData_.data() + audioDataOffset_, out[0], sizeof(f32) * numFrames);
-					audioDataOffset_ += numFrames;
+					memcpy(audioData_.data() + audioDataOffset_, out[0], sizeof(f32) * audioDataFrames);
+					audioDataOffset_ += audioDataFrames;
 				}
 				else
 				{
 					const i32 firstBlock = (audioData_.size() - audioDataOffset_);
 					memcpy(audioData_.data() + audioDataOffset_, out[0], sizeof(f32) * firstBlock);
 					audioDataOffset_ = 0;
-					numFrames -= firstBlock;
+					audioDataFrames -= firstBlock;
 				
-					memcpy(audioData_.data() + audioDataOffset_, out[0], sizeof(f32) * numFrames);
-					audioDataOffset_ += numFrames;
+					memcpy(audioData_.data() + audioDataOffset_, out[0], sizeof(f32) * audioDataFrames);
+					audioDataOffset_ += audioDataFrames;
 				}
 			}
 		}
@@ -320,10 +321,14 @@ namespace
 	{
 	public:
 		MainWindow()
+			: dialogDeviceSelection_(audioBackend_, audioDeviceSettings_)
 		{
-			audioBackend_.Enumerate();
-
-			LoadSettings();
+			audioBackend_.RegisterCallback(&audioCallback_, 0x1, 0xff);
+			
+			if(audioBackend_.StartDevice(audioDeviceSettings_))
+			{
+				deviceSelectionStatus_ = DeviceSelectionStatus::SELECTED;
+			}
 		}
 
 		~MainWindow()
@@ -331,148 +336,125 @@ namespace
 			audioBackend_.UnregisterCallback(&audioCallback_);
 		}
 
-		void operator()()
+		void MenuBar()
 		{
-			if(ImGui::Begin("Main", nullptr))
+			if(ImGui::BeginMenuBar())
 			{
-				if(ImGui::Button("Refresh Devices"))
+				if(ImGui::BeginMenu("File"))
 				{
-					audioBackend_.Enumerate();
+					if(ImGui::MenuItem("Quit"))
+					{
+						exit(0);
+					}
+					ImGui::EndMenu();
 				}
 
-				Core::Array<const char*, 256> inputDeviceNames;
-				Core::Array<const char*, 256> outputDeviceNames;
-				for(i32 idx = 0; idx < audioBackend_.GetNumInputDevices(); ++idx)
+				if(ImGui::BeginMenu("Settings"))
 				{
-					inputDeviceNames[idx] = audioBackend_.GetInputDeviceInfo(idx).name_;
-				}
-				for(i32 idx = 0; idx < audioBackend_.GetNumOutputDevices(); ++idx)
-				{
-					outputDeviceNames[idx] = audioBackend_.GetOutputDeviceInfo(idx).name_;
-				}
+					if(ImGui::MenuItem("Device"))
+					{
+						deviceSelectionStatus_ = DeviceSelectionStatus::NONE;
+					}
 
-				settings_.inputDevice_ = Core::Min(settings_.inputDevice_, audioBackend_.GetNumInputDevices());
-				settings_.outputDevice_ = Core::Min(settings_.outputDevice_, audioBackend_.GetNumOutputDevices());
-
-				ImGui::ListBox("Inputs", &settings_.inputDevice_, inputDeviceNames.data(), audioBackend_.GetNumInputDevices());
-				ImGui::ListBox("Outputs", &settings_.outputDevice_, outputDeviceNames.data(), audioBackend_.GetNumOutputDevices());
-
-				if(settings_.inputDevice_ >= 0)
-				{
-					const auto& deviceInfo = audioBackend_.GetInputDeviceInfo(settings_.inputDevice_);
-					ImGui::SliderInt("Channel:", &settings_.inputChannel_, 0, deviceInfo.maxIn_ - 1);
-				}
-				
-				if(ImGui::Button("Start"))
-				{
-					audioBackend_.StartDevice(settings_.inputDevice_, settings_.outputDevice_, AUDIO_DATA_SIZE);
-					audioBackend_.RegisterCallback(&audioCallback_, 1 << settings_.inputChannel_, 0xff);
-
-					SaveSettings();
-				}
-				
-				if(ImGui::Button("Save"))
-				{
-					audioCallback_.SaveBuffer();
+					ImGui::EndMenu();
 				}
 
-				ImGui::PlotLines("Input:", audioCallback_.GetAudioData(), AUDIO_DATA_SIZE, audioCallback_.GetAudioDataOffset(), nullptr, -1.0f, 1.0f, ImVec2(0.0f, 128.0f));
-
-				static f32 lp = 20000.0f;
-				static f32 hp = 10.0f;
-				ImGui::SliderFloat("LP:", &lp, 10.0f, 20000.0f);
-				ImGui::SliderFloat("HP:", &hp, 10.0f, 20000.0f);
-				audioCallback_.lp_ = ispc::biquad_filter_lowpass(48000.0f, lp, 0.0f);
-				audioCallback_.hp_ = ispc::biquad_filter_highpass(48000.0f, hp, 0.0f);
-
-				f64 rms = 0.0f;
-				const f32* inData = audioCallback_.GetAudioData();
-				for(i32 idx = 0; idx < AUDIO_DATA_SIZE; ++idx)
-				{
-					rms += (inData[idx] * inData[idx]);
-				}
-				rms = sqrt((1.0 / AUDIO_DATA_SIZE) * rms);
-
-				ImGui::Text("RMS: %f", rms);
-
-				// Perform autocorrelation.
-				Core::Array<f32, AUDIO_DATA_SIZE> acfData;
-				ispc::acf_process(AUDIO_DATA_SIZE, audioCallback_.GetAudioData(), acfData.data());
-				i32 largestPeriod = ispc::acf_largest_peak_period(AUDIO_DATA_SIZE, acfData.data());
-				ImGui::PlotLines("ACF:", acfData.data(), AUDIO_DATA_SIZE, 0, nullptr, -2.0f, 2.0f, ImVec2(0.0f, 128.0f));
-
-				static f64 freq = 0.0f;
-				if(largestPeriod > 6 && rms > 0.01)
-				{
-					f64 newFreq = 48000.0 / (f64)largestPeriod;
-
-					if(newFreq > 50.0 && newFreq < 2000.0)
-						freq = newFreq;
-
-					audioCallback_.SetOutputFrequency(freq);
-				}
-
-				freq_[freqIdx_] = (f32)freq;
-				ImGui::PlotLines("Freq:", freq_.data(), freq_.size(), freqIdx_, nullptr, 0.0f, 880.0f, ImVec2(0.0f, 128.0f));
-
-
-				Core::Array<f32, AUDIO_DATA_SIZE> fftOut;
-
-				freqIdx_ = (freqIdx_ + 1) % freq_.size();
-
-				ImGui::Text("Freq: %f hz",  freq);
-
-				i32 midiNote = FreqToMidi((f32)freq);
-				char note[8];
-				MidiToString(midiNote, note, sizeof(note));
-				ImGui::Text("Note: %s (%d)", note, midiNote);
-
-			}
-			ImGui::End();
-		}
-
-		void SaveSettings()
-		{
-			auto file = Core::File("settings.json", Core::FileFlags::CREATE | Core::FileFlags::WRITE);
-			if(file)
-			{
-				Serialization::Serializer ser(file, Serialization::Flags::TEXT);
-				ser.SerializeObject("settings", settings_);
+				ImGui::EndMenuBar();
 			}
 		}
 
-		void LoadSettings()
+		void operator()(const Client::Window& window)
 		{
-			auto file = Core::File("settings.json", Core::FileFlags::READ);
-			if(file)
+
+			// Device selection.
+			if(deviceSelectionStatus_ == DeviceSelectionStatus::NONE)
 			{
-				Serialization::Serializer ser(file, Serialization::Flags::TEXT);
-				ser.SerializeObject("settings", settings_);
+				deviceSelectionStatus_ = dialogDeviceSelection_.Update();
+				if(deviceSelectionStatus_ == DeviceSelectionStatus::SELECTED)
+				{
+					audioDeviceSettings_ = dialogDeviceSelection_.GetSettings();
+					audioDeviceSettings_.Save();
+				}
+			}
+			else
+			{
+				i32 w, h;
+				window.GetSize(w, h);
+				ImGui::SetNextWindowSize(ImVec2(w, h));
+				ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+
+				if(ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_MenuBar))
+				{
+					MenuBar();
+
+					ImGui::PlotLines("Input:", audioCallback_.GetAudioData(), AUDIO_DATA_SIZE, audioCallback_.GetAudioDataOffset(), nullptr, -1.0f, 1.0f, ImVec2(0.0f, 128.0f));
+
+					static f32 lp = 20000.0f;
+					static f32 hp = 10.0f;
+					ImGui::SliderFloat("LP:", &lp, 10.0f, 20000.0f);
+					ImGui::SliderFloat("HP:", &hp, 10.0f, 20000.0f);
+					audioCallback_.lp_ = ispc::biquad_filter_lowpass(48000.0f, lp, 0.0f);
+					audioCallback_.hp_ = ispc::biquad_filter_highpass(48000.0f, hp, 0.0f);
+
+					f64 rms = 0.0f;
+					const f32* inData = audioCallback_.GetAudioData();
+					for(i32 idx = 0; idx < AUDIO_DATA_SIZE; ++idx)
+					{
+						rms += (inData[idx] * inData[idx]);
+					}
+					rms = sqrt((1.0 / AUDIO_DATA_SIZE) * rms);
+
+					ImGui::Text("RMS: %f", rms);
+
+					// Perform autocorrelation.
+					Core::Array<f32, AUDIO_DATA_SIZE> acfData;
+					ispc::acf_process(AUDIO_DATA_SIZE, audioCallback_.GetAudioData(), acfData.data());
+					i32 largestPeriod = ispc::acf_largest_peak_period(AUDIO_DATA_SIZE, acfData.data());
+					ImGui::PlotLines("ACF:", acfData.data(), AUDIO_DATA_SIZE, 0, nullptr, -2.0f, 2.0f, ImVec2(0.0f, 128.0f));
+
+					static f64 freq = 0.0f;
+					if(largestPeriod > 6 && rms > 0.01)
+					{
+						f64 newFreq = 48000.0 / (f64)largestPeriod;
+
+						if(newFreq > 50.0 && newFreq < 2000.0)
+							freq = newFreq;
+
+						audioCallback_.SetOutputFrequency(freq);
+					}
+
+					freq_[freqIdx_] = (f32)freq;
+					ImGui::PlotLines("Freq:", freq_.data(), freq_.size(), freqIdx_, nullptr, 0.0f, 880.0f, ImVec2(0.0f, 128.0f));
+
+
+					Core::Array<f32, AUDIO_DATA_SIZE> fftOut;
+
+					freqIdx_ = (freqIdx_ + 1) % freq_.size();
+
+					ImGui::Text("Freq: %f hz",  freq);
+
+					i32 midiNote = FreqToMidi((f32)freq);
+					char note[8];
+					MidiToString(midiNote, note, sizeof(note));
+					ImGui::Text("Note: %s (%d)", note, midiNote);
+
+					if(ImGui::Button("Save"))
+					{
+						audioCallback_.SaveBuffer();
+					}
+				}
+				ImGui::End();
 			}
 		}
 
-	private:
+	private:		
 		TestAudioCallback audioCallback_;
+
+		DialogDeviceSelection dialogDeviceSelection_;
+		DeviceSelectionStatus deviceSelectionStatus_ = DeviceSelectionStatus::NONE;
 
 		Core::Array<f32, 1024> freq_;
 		i32 freqIdx_ = 0;
-		
-		struct Settings
-		{
-			i32 inputDevice_ = 0;
-			i32 outputDevice_ = 0;
-			i32 inputChannel_ = 0;
-
-			bool Serialize(Serialization::Serializer& ser)
-			{
-				ser.Serialize("inputDevice", inputDevice_);
-				ser.Serialize("outputDevice", outputDevice_);
-				ser.Serialize("inputChannel", inputChannel_);
-				return true;
-			}
-		};
-
-		Settings settings_;
 	};
 
 }
@@ -487,6 +469,8 @@ int main(int argc, char* const argv[])
 		Core::FileChangeDir(path);
 	}
 
+	// Load settings.
+	audioDeviceSettings_.Load();
 
 	Client::Manager::Scoped clientManager;
 	Client::Window window("Music Practice App", 100, 100, 1024, 768, true);
@@ -541,7 +525,7 @@ int main(int argc, char* const argv[])
 
 		ImGui::Manager::BeginFrame(input, scDesc.width_, scDesc.height_);
 
-		mainWindow();
+		mainWindow(window);
 
 		ImGui::Manager::EndFrame(fbsHandle, cmdList);
 

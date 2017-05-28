@@ -7,6 +7,8 @@ INCLUDE_DIRECTORIES(
 SET(SOURCES
 	"audio_backend.h"
 	"audio_backend.cpp"
+	"dialog_device_selection.h"
+	"dialog_device_selection.cpp"
 	"main.cpp"
 	"note.h"
 	"note.cpp"

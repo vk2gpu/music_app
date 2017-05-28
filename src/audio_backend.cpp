@@ -2,6 +2,7 @@
 
 #include "core/array.h"
 #include "core/concurrency.h"
+#include "core/file.h"
 #include "core/misc.h"
 #include "core/vector.h"
 
@@ -10,6 +11,27 @@
 #include <portaudio.h>
 
 #include <algorithm>
+
+void AudioDeviceSettings::Save()
+{
+	auto file = Core::File("settings.json", Core::FileFlags::CREATE | Core::FileFlags::WRITE);
+	if(file)
+	{
+		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
+		ser.SerializeObject("settings", *this);
+	}
+}
+
+void AudioDeviceSettings::Load()
+{
+	auto file = Core::File("settings.json", Core::FileFlags::READ);
+	if(file)
+	{
+		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
+		ser.SerializeObject("settings", *this);
+	}
+}
+
 
 struct AudioBackendImpl
 {
@@ -76,7 +98,7 @@ static int StaticStreamCallback(
 	// Perform clipping.
 	for(i32 out = 0; out < outChannels; ++out)
 	{
-		ispc::clipping_hard(impl_->outStreams_[out], impl_->outStreams_[out], frameCount);
+		ispc::clipping_hard(fout[out], fout[out], frameCount);
 	}
 
 	return paContinue;
@@ -110,10 +132,11 @@ void AudioBackend::Enumerate()
 			AudioDeviceInfo deviceInfo;
 			const auto* paHostAPIInfo = Pa_GetHostApiInfo(paDeviceInfo->hostApi);
 			sprintf_s(deviceInfo.name_, sizeof(deviceInfo.name_), "[%s] - %s", paHostAPIInfo->name, paDeviceInfo->name);
+			deviceInfo.uuid_ = Core::UUID(deviceInfo.name_, 0);
 			deviceInfo.deviceIdx_ = idx;
 			deviceInfo.maxIn_ = paDeviceInfo->maxInputChannels;
 			deviceInfo.maxOut_ = paDeviceInfo->maxOutputChannels;
-					
+				
 					
 			if(deviceInfo.maxIn_ > 0)
 				impl_->inputDeviceInfos_.push_back(deviceInfo);
@@ -132,9 +155,16 @@ void AudioBackend::Enumerate()
 		{
 			return strcmp(a.name_, b.name_) < 0;
 		});
+
+	i32 idx = 0;
+	for(auto& device : impl_->inputDeviceInfos_)
+		device.idx_ = idx++;
+	idx = 0;
+	for(auto& device : impl_->outputDeviceInfos_)
+		device.idx_ = idx++;
 }
 
-void AudioBackend::StartDevice(i32 in, i32 out, i32 bufferSize)
+bool AudioBackend::StartDevice(const AudioDeviceSettings& settings)
 {
 	if(impl_->stream_)
 	{
@@ -142,24 +172,28 @@ void AudioBackend::StartDevice(i32 in, i32 out, i32 bufferSize)
 		Pa_CloseStream(impl_->stream_);
 		impl_->stream_ = nullptr;
 	}
-	const auto& inputDevice = impl_->inputDeviceInfos_[in];
-	const auto& outputDevice = impl_->outputDeviceInfos_[out];
-	const auto* paDeviceInfoIn = Pa_GetDeviceInfo(inputDevice.deviceIdx_);
-	const auto* paDeviceInfoOut = Pa_GetDeviceInfo(outputDevice.deviceIdx_);
 
-	impl_->inChannels_ = inputDevice.maxIn_;
-	impl_->outChannels_ = outputDevice.maxOut_;
+	const auto* inputDevice = GetInputDeviceInfo(settings.inputDevice_);
+	const auto* outputDevice = GetOutputDeviceInfo(settings.outputDevice_);
+	if(!inputDevice || !outputDevice)
+		return false;
+
+	const auto* paDeviceInfoIn = Pa_GetDeviceInfo(inputDevice->deviceIdx_);
+	const auto* paDeviceInfoOut = Pa_GetDeviceInfo(outputDevice->deviceIdx_);
+
+	impl_->inChannels_ = inputDevice->maxIn_;
+	impl_->outChannels_ = outputDevice->maxOut_;
 
 	PaStreamParameters inParams;
-	inParams.device = inputDevice.deviceIdx_;
-	inParams.channelCount = inputDevice.maxIn_;
+	inParams.device = inputDevice->deviceIdx_;
+	inParams.channelCount = inputDevice->maxIn_;
 	inParams.sampleFormat = paFloat32 | paNonInterleaved;
 	inParams.suggestedLatency = paDeviceInfoIn->defaultLowInputLatency;
 	inParams.hostApiSpecificStreamInfo = nullptr;
 
 	PaStreamParameters outParams;
-	outParams.device = outputDevice.deviceIdx_;
-	outParams.channelCount = outputDevice.maxOut_;
+	outParams.device = outputDevice->deviceIdx_;
+	outParams.channelCount = outputDevice->maxOut_;
 	outParams.sampleFormat = paFloat32 | paNonInterleaved;
 	outParams.suggestedLatency = paDeviceInfoOut->defaultLowOutputLatency;
 	outParams.hostApiSpecificStreamInfo = nullptr;
@@ -168,8 +202,18 @@ void AudioBackend::StartDevice(i32 in, i32 out, i32 bufferSize)
 	impl_->outStreams_.resize(impl_->outChannels_);
 
 	PaError err;
-	err = Pa_OpenStream(&impl_->stream_, &inParams, &outParams, 48000.0, bufferSize, paClipOff | paDitherOff, StaticStreamCallback, impl_);
+	err = Pa_OpenStream(&impl_->stream_, &inParams, &outParams, settings.sampleRate_, settings.bufferSize_, paClipOff | paDitherOff, StaticStreamCallback, impl_);
+	if(err)
+		return false;
 	err = Pa_StartStream(impl_->stream_);
+	if(err)
+	{
+		Pa_CloseStream(impl_->stream_);
+		impl_->stream_ = nullptr;
+		return false;
+	}
+
+	return true;
 }
 
 i32 AudioBackend::GetNumInputDevices() const
@@ -191,6 +235,31 @@ const AudioDeviceInfo& AudioBackend::GetOutputDeviceInfo(i32 idx)
 {
 	return impl_->outputDeviceInfos_[idx];
 }
+
+const AudioDeviceInfo* AudioBackend::GetInputDeviceInfo(const Core::UUID& uuid)
+{
+	auto it = std::find_if(impl_->inputDeviceInfos_.begin(), impl_->inputDeviceInfos_.end(),
+	[&uuid](const AudioDeviceInfo& deviceInfo)
+	{
+		return deviceInfo.uuid_ == uuid;
+	});
+	if(it == impl_->inputDeviceInfos_.end())
+		return nullptr;
+	return &(*it);
+}
+
+const AudioDeviceInfo* AudioBackend::GetOutputDeviceInfo(const Core::UUID& uuid)
+{
+	auto it = std::find_if(impl_->outputDeviceInfos_.begin(), impl_->outputDeviceInfos_.end(),
+	[&uuid](const AudioDeviceInfo& deviceInfo)
+	{
+		return deviceInfo.uuid_ == uuid;
+	});
+	if(it == impl_->outputDeviceInfos_.end())
+		return nullptr;
+	return &(*it);
+}
+
 
 bool AudioBackend::RegisterCallback(IAudioCallback* callback, u32 inMask, u32 outMask)
 {
