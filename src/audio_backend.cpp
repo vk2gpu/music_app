@@ -14,21 +14,21 @@
 
 void AudioDeviceSettings::Save()
 {
-	auto file = Core::File("settings.json", Core::FileFlags::CREATE | Core::FileFlags::WRITE);
+	auto file = Core::File("audio_settings.json", Core::FileFlags::READ);
 	if(file)
 	{
 		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
-		ser.SerializeObject("settings", *this);
+		ser.SerializeObject("audio_settings", *this);
 	}
 }
 
 void AudioDeviceSettings::Load()
 {
-	auto file = Core::File("settings.json", Core::FileFlags::READ);
+	auto file = Core::File("audio_settings.json", Core::FileFlags::READ);
 	if(file)
 	{
 		Serialization::Serializer ser(file, Serialization::Flags::TEXT);
-		ser.SerializeObject("settings", *this);
+		ser.SerializeObject("audio_settings", *this);
 	}
 }
 
@@ -114,6 +114,7 @@ AudioBackend::AudioBackend()
 AudioBackend::~AudioBackend()
 {
 	Pa_Terminate();
+	delete impl_;
 }
 
 void AudioBackend::Enumerate()

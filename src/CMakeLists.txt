@@ -1,5 +1,6 @@
 INCLUDE_DIRECTORIES(
 	"${APP_3RDPARTY_PATH}/portaudio"
+	"${APP_3RDPARTY_PATH}/portmidi/pm_common"
 	"${ENGINE_3RDPARTY_PATH}/stb"
 )
 
@@ -10,6 +11,8 @@ SET(SOURCES
 	"dialog_device_selection.h"
 	"dialog_device_selection.cpp"
 	"main.cpp"
+	"midi_backend.h"
+	"midi_backend.cpp"
 	"note.h"
 	"note.cpp"
 	"sound.h"
@@ -25,5 +28,5 @@ SET(SOURCES_ISPC
 
 # Add music_app.
 ADD_ENGINE_EXECUTABLE(music_app ${SOURCES} ${SOURCES_ISPC})
-TARGET_LINK_LIBRARIES(music_app graphics imgui serialization portaudio_static)
+TARGET_LINK_LIBRARIES(music_app graphics imgui serialization portaudio_static portmidi-static)
 

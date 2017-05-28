@@ -29,8 +29,14 @@ SET(PA_USE_WDMKS OFF)
 SET(PA_USE_DS OFF)
 
 ADD_SUBDIRECTORY("3rdparty/portaudio")
+ADD_SUBDIRECTORY("3rdparty/portmidi")
+
 SET_TARGET_PROPERTIES(portaudio PROPERTIES FOLDER "3rdparty/portaudio")
 SET_TARGET_PROPERTIES(portaudio_static PROPERTIES FOLDER "3rdparty/portaudio")
+
+SET_TARGET_PROPERTIES(portmidi-dynamic PROPERTIES FOLDER "3rdparty/portmidi")
+SET_TARGET_PROPERTIES(portmidi-static PROPERTIES FOLDER "3rdparty/portmidi")
+SET_TARGET_PROPERTIES(pmjni PROPERTIES FOLDER "3rdparty/portmidi")
 
 INCLUDE_DIRECTORIES(
 	"engine/src"

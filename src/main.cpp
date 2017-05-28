@@ -1,5 +1,6 @@
 #include "audio_backend.h"
 #include "dialog_device_selection.h"
+#include "midi_backend.h"
 #include "note.h"
 #include "sound.h"
 
@@ -23,9 +24,11 @@
 #include <algorithm>
 #include <utility>
 
+
 namespace
 {
 	AudioBackend audioBackend_;
+	MidiBackend midiBackend_;
 	AudioDeviceSettings audioDeviceSettings_;
 
 	GPU::SetupParams GetDefaultSetupParams()
@@ -521,6 +524,10 @@ int main(int argc, char* const argv[])
 	{
 		Core::FileChangeDir(path);
 	}
+
+	// Enumerate backend.
+	audioBackend_.Enumerate();
+	midiBackend_.Enumerate();
 
 	// Load settings.
 	audioDeviceSettings_.Load();
