@@ -18,8 +18,9 @@ SET(SOURCES
 
 SET(SOURCES_ISPC
 	"ispc/acf.ispc"
-	"ispc/biquad_filter.ispc"
+	"ispc/audio_stats.ispc"
 	"ispc/clipping.ispc"
+	"ispc/biquad_filter.ispc"
 )
 
 # Add music_app.

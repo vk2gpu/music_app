@@ -4,6 +4,7 @@
 #include "sound.h"
 
 #include "ispc/acf_ispc.h"
+#include "ispc/audio_stats_ispc.h"
 #include "ispc/biquad_filter_ispc.h"
 
 #include "client/manager.h"
@@ -90,9 +91,9 @@ namespace
 
 		SoundBuffer()
 		{
-			u32 soundBufferID = Core::AtomicInc(&SoundBufferID);
-			sprintf_s(flushFileName_.data(), flushFileName_.size(), "temp_audio_out_%08u.raw", soundBufferID);
-			sprintf_s(saveFileName_.data(), saveFileName_.size(), "audio_out_%08u.wav", soundBufferID);
+			soundBufferID_ = Core::AtomicInc(&SoundBufferID);
+			sprintf_s(flushFileName_.data(), flushFileName_.size(), "temp_audio_out_%08u.raw", soundBufferID_);
+			sprintf_s(saveFileName_.data(), saveFileName_.size(), "audio_out_%08u.wav", soundBufferID_);
 
 			buffer_.resize(FLUSH_SIZE);
 			flushBuffer_.resize(FLUSH_SIZE);
@@ -112,7 +113,7 @@ namespace
 				Job::Manager::WaitForCounter(flushCounter_, 0);
 			}
 
-			SaveSoundAsync(flushFileName_.data(), saveFileName_.data(), Sound::Format::F32, 1, 48000);
+			SaveSoundAsync(flushFileName_.data(), saveFileName_.data(), Sound::Format::F32, 1, audioDeviceSettings_.sampleRate_);
 		}
 
 		void FlushData()
@@ -154,7 +155,11 @@ namespace
 			totalSize_ += size;
 		}
 
+		u32 GetID() const { return soundBufferID_; }
+
 	private:
+		/// Current ID.
+		u32 soundBufferID_ = 0;
 		/// Current size of buffer.
 		i32 size_ = 0;
 		/// Total size of buffer (inc. flushed)
@@ -177,46 +182,75 @@ namespace
 	
 	static const i32 AUDIO_DATA_SIZE = 2048;
 
-	class TestAudioCallback : public IAudioCallback
+	/// Gathers stats for input audio.
+	class AudioStatsCallback : public IAudioCallback
 	{
 	public:
-		TestAudioCallback()
+		AudioStatsCallback()
 		{
-			lp_ = ispc::biquad_filter_passthrough();
-			hp_ = ispc::biquad_filter_passthrough();
-			memset(lpb_.data(), 0, sizeof(lpb_));
-			memset(hpb_.data(), 0, sizeof(hpb_));
 		}
 
 		void OnAudioCallback(i32 numIn, i32 numOut, const f32** in, f32** out, i32 numFrames) override
 		{
-			// If RMS is over a certain amount, create a sound buffer.
 			if(numIn > 0)
 			{
-				f64 rms = 0.0f;
-				const f32* inData = in[0];
-				for(i32 idx = 0; idx < numFrames; ++idx)
-				{
-					rms += (inData[idx] * inData[idx]);
-				}
-				rms = sqrt((1.0 / numFrames) * rms);
+				rms_ = ispc::audio_stats_rms(in[0], numFrames);
+				max_ = ispc::audio_stats_max(in[0], numFrames);
+				
+				/// TODO: Lerp to 0.0 to scale for different buffer size/sample rate.
+				rmsSmoothed_ *= 0.99f;
+				maxSmoothed_ *= 0.99f;
 
-				if(soundBuffer_ == nullptr && rms > 0.01f)
+				rmsSmoothed_ = Core::Max(rmsSmoothed_, rms_);
+				maxSmoothed_ = Core::Max(maxSmoothed_, max_);
+			}
+		}
+
+
+		f32 rms_ = 0.0f;
+		f32 max_ = 0.0f;
+
+		f32 rmsSmoothed_ = 0.0f;
+		f32 maxSmoothed_ = 0.0f;
+	};
+
+	/// Handles automatic recording to disc.
+	class AudioRecordingCallback : public IAudioCallback
+	{
+	public:
+		AudioRecordingCallback(AudioStatsCallback& audioStats)
+			: audioStats_(audioStats)
+		{
+		}
+
+		virtual ~AudioRecordingCallback()
+		{
+			if(soundBufferCounter_)
+			{
+				Job::Manager::WaitForCounter(soundBufferCounter_, 0);
+			}
+			delete soundBuffer_;
+		}
+
+		void OnAudioCallback(i32 numIn, i32 numOut, const f32** in, f32** out, i32 numFrames) override
+		{
+			if(numIn > 0)
+			{
+				if(soundBuffer_ == nullptr && audioStats_.max_ > 0.01f)
 				{
 					soundBuffer_ = new SoundBuffer();
 				}
 
-
-				if(rms > 0.01f)
+				if(audioStats_.max_ > 0.1f)
 				{
-					lowRmsSamples_ = 0;
+					lowMaxSamples_ = 0;
 				}
 				else
 				{
-					lowRmsSamples_ += numFrames;
+					lowMaxSamples_ += numFrames;
 				}
 
-				if(soundBuffer_ != nullptr && lowRmsSamples_ > (2 * 48000))
+				if(soundBuffer_ != nullptr && lowMaxSamples_ > (2 * audioDeviceSettings_.sampleRate_))
 				{
 					Core::AtomicExchg(&saveBuffer_, 1);
 				}
@@ -240,15 +274,63 @@ namespace
 							delete soundBuffer;
 						};
 
+						Core::ScopedMutex lock(recordingMutex_);
+						recordingIds_.push_back(soundBuffer_->GetID());
+
 						jobDesc.param_ = 0;
 						jobDesc.data_ = soundBuffer_;
 						jobDesc.name_ = "SoundBuffer save";
 						Job::Manager::RunJobs(&jobDesc, 1, &soundBufferCounter_);
 
 						soundBuffer_ = nullptr;
+
+						lowMaxSamples_ = 0;
 					}
 				}
+			}
+		}
 
+		void SaveBuffer()
+		{
+			Core::AtomicExchg(&saveBuffer_, 1);
+		}
+
+		Core::Vector<i32> GetRecordingIDs() const
+		{
+			Core::ScopedMutex lock(recordingMutex_);
+			return recordingIds_;
+		}
+
+	private:
+		AudioStatsCallback& audioStats_;
+
+		SoundBuffer* soundBuffer_ = nullptr;
+		Job::Counter* soundBufferCounter_ = nullptr;
+
+		i32 lowMaxSamples_ = 0;
+
+		volatile i32 saveBuffer_ = 0;
+
+		mutable Core::Mutex recordingMutex_;
+		Core::Vector<i32> recordingIds_;
+	};
+
+	/// Audio callback for testing.
+	class TestAudioCallback : public IAudioCallback
+	{
+	public:
+		TestAudioCallback()
+		{
+			lp_ = ispc::biquad_filter_passthrough();
+			hp_ = ispc::biquad_filter_passthrough();
+			memset(lpb_.data(), 0, sizeof(lpb_));
+			memset(hpb_.data(), 0, sizeof(hpb_));
+		}
+
+		void OnAudioCallback(i32 numIn, i32 numOut, const f32** in, f32** out, i32 numFrames) override
+		{
+			if(numIn > 0)
+			{
 				if(numOut > 0)
 				{	
 					for(int i = 0; i < numOut; ++i)
@@ -292,23 +374,11 @@ namespace
 			freq_ = freq;
 		}
 
-		void SaveBuffer()
-		{
-			Core::AtomicExchg(&saveBuffer_, 1);
-		}
-
 		Core::Array<f32, AUDIO_DATA_SIZE> audioData_;
 		i32 audioDataOffset_ = 0;
 
 		f32 freq_ = 440.0f;
 		f64 freqTick_ = 0.0f;
-
-		SoundBuffer* soundBuffer_ = nullptr;
-		Job::Counter* soundBufferCounter_ = nullptr;
-
-		i32 lowRmsSamples_ = 0;
-
-		volatile i32 saveBuffer_ = 0;
 
 		ispc::BiquadCoeff lp_;
 		ispc::BiquadCoeff hp_;
@@ -322,7 +392,10 @@ namespace
 	public:
 		MainWindow()
 			: dialogDeviceSelection_(audioBackend_, audioDeviceSettings_)
+			, audioRecordingCallback_(audioStatsCallback_)
 		{
+			audioBackend_.RegisterCallback(&audioStatsCallback_, 0x1, 0x0);
+			audioBackend_.RegisterCallback(&audioRecordingCallback_, 0x1, 0x0);
 			audioBackend_.RegisterCallback(&audioCallback_, 0x1, 0xff);
 			
 			if(audioBackend_.StartDevice(audioDeviceSettings_))
@@ -333,12 +406,14 @@ namespace
 
 		~MainWindow()
 		{
+			audioBackend_.UnregisterCallback(&audioStatsCallback_);
+			audioBackend_.UnregisterCallback(&audioRecordingCallback_);
 			audioBackend_.UnregisterCallback(&audioCallback_);
 		}
 
 		void MenuBar()
 		{
-			if(ImGui::BeginMenuBar())
+			if(ImGui::BeginMainMenuBar())
 			{
 				if(ImGui::BeginMenu("File"))
 				{
@@ -359,12 +434,13 @@ namespace
 					ImGui::EndMenu();
 				}
 
-				ImGui::EndMenuBar();
+				ImGui::EndMainMenuBar();
 			}
 		}
 
 		void operator()(const Client::Window& window)
 		{
+			MenuBar();
 
 			// Device selection.
 			if(deviceSelectionStatus_ == DeviceSelectionStatus::NONE)
@@ -378,69 +454,44 @@ namespace
 			}
 			else
 			{
-				i32 w, h;
-				window.GetSize(w, h);
-				ImGui::SetNextWindowSize(ImVec2(w, h));
-				ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
 
-				if(ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_MenuBar))
+				if(ImGui::Begin("Debug", nullptr))
 				{
-					MenuBar();
-
-					ImGui::PlotLines("Input:", audioCallback_.GetAudioData(), AUDIO_DATA_SIZE, audioCallback_.GetAudioDataOffset(), nullptr, -1.0f, 1.0f, ImVec2(0.0f, 128.0f));
+					ImGui::Text("Audio Input");
+					ImGui::PlotLines("Input", audioCallback_.GetAudioData(), AUDIO_DATA_SIZE, audioCallback_.GetAudioDataOffset(), nullptr, -1.0f, 1.0f, ImVec2(0.0f, 128.0f));
 
 					static f32 lp = 20000.0f;
 					static f32 hp = 10.0f;
-					ImGui::SliderFloat("LP:", &lp, 10.0f, 20000.0f);
-					ImGui::SliderFloat("HP:", &hp, 10.0f, 20000.0f);
-					audioCallback_.lp_ = ispc::biquad_filter_lowpass(48000.0f, lp, 0.0f);
-					audioCallback_.hp_ = ispc::biquad_filter_highpass(48000.0f, hp, 0.0f);
+					ImGui::SliderFloat("LP", &lp, 10.0f, 20000.0f);
+					ImGui::SliderFloat("HP", &hp, 10.0f, 20000.0f);
+					audioCallback_.lp_ = ispc::biquad_filter_lowpass(audioDeviceSettings_.sampleRate_, lp, 0.0f);
+					audioCallback_.hp_ = ispc::biquad_filter_highpass(audioDeviceSettings_.sampleRate_, hp, 0.0f);
 
-					f64 rms = 0.0f;
-					const f32* inData = audioCallback_.GetAudioData();
-					for(i32 idx = 0; idx < AUDIO_DATA_SIZE; ++idx)
-					{
-						rms += (inData[idx] * inData[idx]);
-					}
-					rms = sqrt((1.0 / AUDIO_DATA_SIZE) * rms);
+					
+					f32 rms = audioStatsCallback_.rms_;
+					f32 rmsSmoothed = audioStatsCallback_.rmsSmoothed_;
+					//ImGui::SliderFloat("RMS", &rms, 0.0f, 1.0f);
+					ImGui::SliderFloat("RMS Smoothed", &rmsSmoothed, 0.0f, 1.0f);
 
-					ImGui::Text("RMS: %f", rms);
-
-					// Perform autocorrelation.
-					Core::Array<f32, AUDIO_DATA_SIZE> acfData;
-					ispc::acf_process(AUDIO_DATA_SIZE, audioCallback_.GetAudioData(), acfData.data());
-					i32 largestPeriod = ispc::acf_largest_peak_period(AUDIO_DATA_SIZE, acfData.data());
-					ImGui::PlotLines("ACF:", acfData.data(), AUDIO_DATA_SIZE, 0, nullptr, -2.0f, 2.0f, ImVec2(0.0f, 128.0f));
-
-					static f64 freq = 0.0f;
-					if(largestPeriod > 6 && rms > 0.01)
-					{
-						f64 newFreq = 48000.0 / (f64)largestPeriod;
-
-						if(newFreq > 50.0 && newFreq < 2000.0)
-							freq = newFreq;
-
-						audioCallback_.SetOutputFrequency(freq);
-					}
-
-					freq_[freqIdx_] = (f32)freq;
-					ImGui::PlotLines("Freq:", freq_.data(), freq_.size(), freqIdx_, nullptr, 0.0f, 880.0f, ImVec2(0.0f, 128.0f));
-
-
-					Core::Array<f32, AUDIO_DATA_SIZE> fftOut;
-
-					freqIdx_ = (freqIdx_ + 1) % freq_.size();
-
-					ImGui::Text("Freq: %f hz",  freq);
-
-					i32 midiNote = FreqToMidi((f32)freq);
-					char note[8];
-					MidiToString(midiNote, note, sizeof(note));
-					ImGui::Text("Note: %s (%d)", note, midiNote);
+					f32 max = audioStatsCallback_.max_;
+					f32 maxSmoothed = audioStatsCallback_.maxSmoothed_;
+					//ImGui::SliderFloat("Max", &max, 0.0f, 1.0f);
+					ImGui::SliderFloat("Max Smoothed", &maxSmoothed, 0.0f, 1.0f);
 
 					if(ImGui::Button("Save"))
 					{
-						audioCallback_.SaveBuffer();
+						audioRecordingCallback_.SaveBuffer();
+					}
+
+					ImGui::Separator();
+					ImGui::Text("Recordings");
+
+					Core::Array<char, Core::MAX_PATH_LENGTH> fileName;
+					auto recordingIds = audioRecordingCallback_.GetRecordingIDs();
+					for(auto id : recordingIds)
+					{
+						sprintf_s(fileName.data(), fileName.size(), "audio_out_%08u.wav", id);
+						ImGui::BulletText("- %s", fileName.data());
 					}
 				}
 				ImGui::End();
@@ -448,6 +499,8 @@ namespace
 		}
 
 	private:		
+		AudioStatsCallback audioStatsCallback_;
+		AudioRecordingCallback audioRecordingCallback_;
 		TestAudioCallback audioCallback_;
 
 		DialogDeviceSelection dialogDeviceSelection_;
