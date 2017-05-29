@@ -1,6 +1,9 @@
 #include "sound.h"
+#include "core/array.h"
+#include "core/concurrency.h"
 #include "core/file.h"
 #include "core/vector.h"
+#include "job/manager.h"
 
 #pragma warning(push)
 #pragma warning(disable:4244)
@@ -83,7 +86,7 @@ namespace Sound
 			return false;
 		}
 
-		void ReadChunks(Core::File& file, SoundData& soundData)
+		void ReadChunks(Core::File& file, Data& data)
 		{
 			i64 fileSize = file.Size();
 			(void)fileSize;
@@ -101,12 +104,12 @@ namespace Sound
 				case FmtChunk::ID:
 					{
 						file.Read(&fmtChunk, sizeof(fmtChunk));
-						soundData.sampleRate_ = fmtChunk.sampleRate_;
-						soundData.numChannels_ = fmtChunk.numChannels_;
+						data.sampleRate_ = fmtChunk.sampleRate_;
+						data.numChannels_ = fmtChunk.numChannels_;
 						if(fmtChunk.audioFormat_ == 1 && fmtChunk.bitsPerSample_ == 16)
-							soundData.format_ = Format::S16;
+							data.format_ = Format::S16;
 						else if(fmtChunk.audioFormat_ == 3 && fmtChunk.bitsPerSample_ == 32)
-							soundData.format_ = Format::F32;
+							data.format_ = Format::F32;
 					}
 					break;
 
@@ -124,11 +127,11 @@ namespace Sound
 
 				case DataChunk::ID:
 					{
-						soundData.numBytes_ = chunk.size_;
-						soundData.numSamples_ = chunk.size_ / ((fmtChunk.bitsPerSample_ * fmtChunk.numChannels_) / 8);
+						data.numBytes_ = chunk.size_;
+						data.numSamples_ = chunk.size_ / ((fmtChunk.bitsPerSample_ * fmtChunk.numChannels_) / 8);
 
-						soundData.rawData_ = new u8[soundData.numBytes_];
-						file.Read(soundData.rawData_, soundData.numBytes_);
+						data.rawData_ = new u8[data.numBytes_];
+						file.Read(data.rawData_, data.numBytes_);
 					}
 					break;
 				}
@@ -138,18 +141,18 @@ namespace Sound
 			}
 		}
 
-		SoundData Load(Core::File& file)
+		Data Load(Core::File& file)
 		{
-			SoundData soundData;
+			Data data;
 			if(ReadHeader(file))
 			{
-				ReadChunks(file, soundData);
+				ReadChunks(file, data);
 			}
-			return std::move(soundData);
+			return std::move(data);
 		}
 
 
-		void Save(Core::File& file, const SoundData& soundData)
+		void Save(Core::File& file, const Data& data)
 		{
 			Chunk chunk;
 			RIFFChunk riffChunk;
@@ -162,14 +165,14 @@ namespace Sound
 			chunk.size_ = sizeof(RIFFChunk) + 
 				sizeof(Chunk) + sizeof(FmtChunk) + 
 				sizeof(Chunk) + sizeof(FACTChunk) +
-				sizeof(Chunk) + soundData.numBytes_;
+				sizeof(Chunk) + data.numBytes_;
 
 			riffChunk.format_ = WAVE_ID;
 			file.Write(&chunk, sizeof(chunk));
 			file.Write(&riffChunk, sizeof(riffChunk));
 
 			// Setup format chunk.
-			switch(soundData.format_)
+			switch(data.format_)
 			{
 			case Format::S16:
 				fmtChunk.audioFormat_ = 1;
@@ -183,8 +186,8 @@ namespace Sound
 				break;
 			}
 
-			fmtChunk.numChannels_ = (u16)soundData.numChannels_;
-			fmtChunk.sampleRate_ = soundData.sampleRate_;
+			fmtChunk.numChannels_ = (u16)data.numChannels_;
+			fmtChunk.sampleRate_ = data.sampleRate_;
 			fmtChunk.byteRate_ = (fmtChunk.numChannels_ * fmtChunk.bitsPerSample_ * fmtChunk.sampleRate_) / 8;
 
 			chunk.id_ = FmtChunk::ID;
@@ -193,7 +196,7 @@ namespace Sound
 			file.Write(&fmtChunk, sizeof(fmtChunk));
 
 			// Setup fact chunk.
-			factChunk.fileSize_ = soundData.numSamples_;
+			factChunk.fileSize_ = data.numSamples_;
 
 			chunk.id_ = FACTChunk::ID;
 			chunk.size_ = sizeof(FACTChunk);
@@ -202,9 +205,9 @@ namespace Sound
 
 			// Write data chunk.
 			chunk.id_ = DataChunk::ID;
-			chunk.size_ = soundData.numBytes_;
+			chunk.size_ = data.numBytes_;
 			file.Write(&chunk, sizeof(chunk));
-			file.Write(soundData.rawData_, soundData.numBytes_);
+			file.Write(data.rawData_, data.numBytes_);
 
 		}
 	}
@@ -214,9 +217,9 @@ namespace Sound
 	{
 		static const u32 TAG = 'SggO';
 
-		SoundData Load(Core::File& file)
+		Data Load(Core::File& file)
 		{
-			SoundData soundData;
+			Data data;
 			Core::Vector<u8> fileData;
 			fileData.resize((i32)file.Size());
 			file.Read(fileData.data(), fileData.size());
@@ -227,14 +230,14 @@ namespace Sound
 			{
 				stb_vorbis_info vorbisInfo = stb_vorbis_get_info(vorbis);
 
-				soundData.numChannels_ = vorbisInfo.channels;
-				soundData.sampleRate_ = vorbisInfo.sample_rate;
-				soundData.numSamples_ = stb_vorbis_stream_length_in_samples(vorbis);
-				soundData.format_ = Format::F32;
-				soundData.numBytes_ = sizeof(f32) * soundData.numSamples_ * soundData.numChannels_;
-				soundData.rawData_ = new u8[soundData.numBytes_];
+				data.numChannels_ = vorbisInfo.channels;
+				data.sampleRate_ = vorbisInfo.sample_rate;
+				data.numSamples_ = stb_vorbis_stream_length_in_samples(vorbis);
+				data.format_ = Format::F32;
+				data.numBytes_ = sizeof(f32) * data.numSamples_ * data.numChannels_;
+				data.rawData_ = new u8[data.numBytes_];
 
-				f32* outData = reinterpret_cast<f32*>(soundData.rawData_);
+				f32* outData = reinterpret_cast<f32*>(data.rawData_);
 
 				for(;;)	
 				{
@@ -247,7 +250,7 @@ namespace Sound
 
 					for(i32 sample = 0; sample < n; ++sample)
 					{
-						for(i32 ch = 0; ch < soundData.numChannels_; ++ch)
+						for(i32 ch = 0; ch < data.numChannels_; ++ch)
 						{
 							*outData++ = outputs[ch][sample];
 						}
@@ -255,27 +258,27 @@ namespace Sound
 				}
 				stb_vorbis_close(vorbis);
 			}
-			return std::move(soundData);
+			return std::move(data);
 		}
 	} // namespace Ogg
 
-	SoundData::~SoundData()
+	Data::~Data()
 	{
 		delete [] rawData_;
 	}
 
-	SoundData::SoundData(SoundData&& other)
+	Data::Data(Data&& other)
 	{
 		swap(other);
 	}
 
-	SoundData& SoundData::operator=(SoundData&& other)
+	Data& Data::operator=(Data&& other)
 	{
 		swap(other);
 		return *this;
 	}
 
-	void SoundData::swap(SoundData& other)
+	void Data::swap(Data& other)
 	{
 		using std::swap;
 		swap(numChannels_, other.numChannels_);
@@ -286,16 +289,14 @@ namespace Sound
 		swap(rawData_, other.rawData_);
 	}
 
-	SoundData::operator bool() const
+	Data::operator bool() const
 	{
 		return format_ != Format::UNKNOWN && !!rawData_;
 	}
 
 
-	SoundData Load(Core::File& file)
+	Data Load(Core::File& file)
 	{
-		SoundData soundData;
-
 		u32 tag = 0;
 		file.Read(&tag, sizeof(tag));
 		file.Seek(0);
@@ -309,25 +310,173 @@ namespace Sound
 			return Ogg::Load(file);
 		}
 
-		return SoundData();
+		return Data();
 	}
 
-	void Save(Core::File& file, const SoundData& soundData)
+	void Save(Core::File& file, const Data& data)
 	{
-		Wav::Save(file, soundData);
+		Wav::Save(file, data);
 	}
 
 	void Save(Core::File& rawFile, Core::File& outFile, Format format, i32 numChannels, i32 sampleRate)
 	{
-		Sound::SoundData soundData;
-		soundData.numChannels_ = 1;
-		soundData.sampleRate_ = 48000;
-		soundData.format_ = Sound::Format::F32;
-		soundData.numBytes_ = (u32)rawFile.Size();
-		soundData.rawData_ = new u8[soundData.numBytes_];
-		rawFile.Read(soundData.rawData_, soundData.numBytes_);
-		soundData.numSamples_ = soundData.numBytes_ / (soundData.numChannels_ * sizeof(f32));
-		Sound::Save(outFile, soundData);
+		Sound::Data data;
+		data.numChannels_ = 1;
+		data.sampleRate_ = 48000;
+		data.format_ = Sound::Format::F32;
+		data.numBytes_ = (u32)rawFile.Size();
+		data.rawData_ = new u8[data.numBytes_];
+		rawFile.Read(data.rawData_, data.numBytes_);
+		data.numSamples_ = data.numBytes_ / (data.numChannels_ * sizeof(f32));
+		Sound::Save(outFile, data);
+	}
+
+	void SaveSoundAsync(const char* rawFilename, const char* outFilename, Format format, i32 numChannels, i32 sampleRate)
+	{
+		struct Params
+		{
+			Core::Array<char, Core::MAX_PATH_LENGTH> inFilename_;
+			Core::Array<char, Core::MAX_PATH_LENGTH> outFilename_;
+			Sound::Format format_;
+			i32 numChannels_;
+			i32 sampleRate_;
+		};
+
+		auto* params = new Params;
+		strcpy_s(params->inFilename_.data(), params->inFilename_.size(), rawFilename);
+		strcpy_s(params->outFilename_.data(), params->outFilename_.size(), outFilename);
+		params->format_ = format;
+		params->numChannels_ = numChannels;
+		params->sampleRate_ = sampleRate;
+
+		Job::JobDesc jobDesc;
+		jobDesc.func_ = [](i32 param, void* data) {
+			Params* params = static_cast<Params*>(data);
+				
+			auto inFile = Core::File(params->inFilename_.data(), Core::FileFlags::READ);
+			if(inFile)
+			{
+				if(Core::FileExists(params->outFilename_.data()))
+				{
+					Core::FileRemove(params->outFilename_.data());
+				}
+
+				auto outFile = Core::File(params->outFilename_.data(), Core::FileFlags::CREATE | Core::FileFlags::WRITE);
+				Sound::Save(inFile, outFile, params->format_, params->numChannels_, params->sampleRate_);
+
+				std::swap(inFile, Core::File());
+				if(Core::FileExists(params->inFilename_.data()))
+				{
+					Core::FileRemove(params->inFilename_.data());
+				}
+			}
+
+			delete params;
+		};
+		jobDesc.data_ = params;
+		jobDesc.name_ = "Save file to wav";
+		Job::Manager::RunJobs(&jobDesc, 1);
+	}
+
+	struct OutputStreamImpl
+	{
+		/// Current ID.
+		u32 soundBufferID_ = 0;
+		/// Sample rate to save with.
+		i32 sampleRate_ = 0;
+		/// Current size of buffer.
+		i32 size_ = 0;
+		/// Total size of buffer (inc. flushed)
+		i32 totalSize_ = 0;
+		/// Buffer we're writing into currently.
+		Core::Vector<u8> buffer_;
+		/// Buffer to flush to disk.
+		Core::Vector<u8> flushBuffer_;
+		/// File to flush out to incrementally.
+		Core::File flushFile_;
+		/// Flush file name.
+		Core::Array<char, Core::MAX_PATH_LENGTH> flushFileName_;
+		/// Save file name.
+		Core::Array<char, Core::MAX_PATH_LENGTH> saveFileName_;
+		/// Flush job counter to wait until flushing to disk has completed.
+		Job::Counter* flushCounter_ = nullptr; 
+	};
+
+	volatile i32 OutputStream::SoundBufferID = 0;
+
+	OutputStream::OutputStream(i32 sampleRate)
+	{
+		impl_ = new OutputStreamImpl();
+
+		impl_->soundBufferID_ = Core::AtomicInc(&SoundBufferID);
+		sprintf_s(impl_->flushFileName_.data(), impl_->flushFileName_.size(), "temp_audio_out_%08u.raw", impl_->soundBufferID_);
+		sprintf_s(impl_->saveFileName_.data(), impl_->saveFileName_.size(), "audio_out_%08u.wav", impl_->soundBufferID_);
+		impl_->sampleRate_ = sampleRate;
+		impl_->buffer_.resize(FLUSH_SIZE);
+		impl_->flushBuffer_.resize(FLUSH_SIZE);
+		if(Core::FileExists(impl_->flushFileName_.data()))
+		{
+			Core::FileRemove(impl_->flushFileName_.data());
+		}
+		impl_->flushFile_ = Core::File(impl_->flushFileName_.data(), Core::FileFlags::CREATE | Core::FileFlags::WRITE);
+	}
+
+	OutputStream::~OutputStream()
+	{
+		FlushData();
+
+		if(impl_->flushCounter_)
+		{
+			Job::Manager::WaitForCounter(impl_->flushCounter_, 0);
+		}
+
+		SaveSoundAsync(impl_->flushFileName_.data(), impl_->saveFileName_.data(), Sound::Format::F32, 1, impl_->sampleRate_);
+
+		delete impl_;
+	}
+
+	void OutputStream::FlushData()
+	{
+		if(impl_->flushCounter_)
+		{
+			Job::Manager::WaitForCounter(impl_->flushCounter_, 0);
+		}
+
+		// Swap buffers.
+		std::swap(impl_->flushBuffer_, impl_->buffer_);
+
+		// Kick job to copy in background to avoid hitching on audio thread.
+		Job::JobDesc jobDesc;
+		jobDesc.func_ = [](i32 param, void* data) {
+			OutputStreamImpl* impl = static_cast<OutputStreamImpl*>(data);
+			impl->flushFile_.Write(impl->flushBuffer_.data(), param);
+		};
+
+		jobDesc.param_ = impl_->size_;
+		jobDesc.data_ = impl_;
+		jobDesc.name_ = "SoundBuffer flush";
+		Job::Manager::RunJobs(&jobDesc, 1, &impl_->flushCounter_);
+
+		impl_->size_ = 0;
+	}
+		
+	void OutputStream::Push(const void* data, i32 size)
+	{
+		// Always alloc double what's needed.
+		i32 requiredSize = impl_->size_ + size;
+		if(requiredSize > impl_->buffer_.size())
+		{
+			FlushData();
+		}
+
+		memcpy(impl_->buffer_.data() + impl_->size_, data, size);
+		impl_->size_ += size;
+		impl_->totalSize_ += size;
+	}
+
+	u32 OutputStream::GetID() const
+	{
+		return impl_->soundBufferID_;
 	}
 
 } // namespace Sound

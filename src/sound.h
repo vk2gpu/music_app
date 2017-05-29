@@ -14,16 +14,16 @@ namespace Sound
 		F32
 	};
 
-	struct SoundData
+	struct Data
 	{
-		SoundData() = default;
-		SoundData(const SoundData&) = delete;
-		SoundData& operator=(const SoundData& other) = delete;
+		Data() = default;
+		Data(const Data&) = delete;
+		Data& operator=(const Data& other) = delete;
 
-		~SoundData();	
-		SoundData(SoundData&& other);
-		SoundData& operator=(SoundData&& other);
-		void swap(SoundData& other);
+		~Data();	
+		Data(Data&& other);
+		Data& operator=(Data&& other);
+		void swap(Data& other);
 		operator bool() const;
 
 		i32 numChannels_ = 0;
@@ -38,16 +38,36 @@ namespace Sound
 	/**
 	 * Load a sound from a given file.
 	 */
-	SoundData Load(Core::File& file);
+	Data Load(Core::File& file);
 
 	/**
 	 * Save a sound to a given file.
 	 */
-	void Save(Core::File& file, const SoundData& soundData);
+	void Save(Core::File& file, const Data& soundData);
 
 	/**
 	 * Save a sound from raw.
 	 */
 	void Save(Core::File& rawFile, Core::File& outFile, Format format, i32 numChannels, i32 sampleRate);
+
+
+	/**
+	 * Output stream.
+	 */
+	class OutputStream
+	{
+	public:
+		static const i32 FLUSH_SIZE = 1024 * 1024 * 1;
+		static volatile i32 SoundBufferID;
+
+		OutputStream(i32 sampleRate);
+		~OutputStream();
+		void FlushData();
+		void Push(const void* data, i32 size);
+		u32 GetID() const;
+
+	private:
+		struct OutputStreamImpl* impl_ = nullptr;
+	};
 
 } // namespace Sound
