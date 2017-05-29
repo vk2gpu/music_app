@@ -1,6 +1,7 @@
 #include "app.h"
 #include "audio_backend.h"
 #include "dialog_device_selection.h"
+#include "gui.h"
 #include "midi_backend.h"
 #include "settings.h"
 #include "sound.h"
@@ -11,7 +12,9 @@
 #include "core/concurrency.h"
 #include "core/debug.h"
 #include "core/file.h"
+#include "core/map.h"
 #include "core/misc.h"
+#include "core/string.h"
 #include "core/timer.h"
 #include "gpu/manager.h"
 #include "job/manager.h"
@@ -20,6 +23,7 @@
 
 #include "audio_stats_callback.h"
 #include "audio_buffer_callback.h"
+#include "audio_playback_callback.h"
 #include "audio_recording_callback.h"
 
 #include "dialog_device_selection.h"
@@ -41,22 +45,23 @@ namespace
 	GPU::Handle cmdHandle_;
 
 	GPU::CommandList* cmdList_ = nullptr;
-
-
+	
 	Callbacks::AudioStatsCallback* audioStatsCallback_ = nullptr;
 	Callbacks::AudioRecordingCallback* audioRecordingCallback_ = nullptr;
 	Callbacks::AudioBufferCallback* audioBufferCallback_ = nullptr;
+	Callbacks::AudioPlaybackCallback* audioPlaybackCallback_ = nullptr;
 
 	Gui::DialogDeviceSelection* dialogDeviceSelection_ = nullptr;
 	Gui::DeviceSelectionStatus deviceSelectionStatus_ = Gui::DeviceSelectionStatus::NONE;
-
-
+	
 	GPU::SetupParams GetDefaultSetupParams()
 	{
 		GPU::SetupParams setupParams;
 		setupParams.debuggerIntegration_ = GPU::DebuggerIntegrationFlags::NONE;
 		return setupParams;
 	}
+
+	Core::Map<Core::String, IAudioCallback*> callbacks_;
 }
 
 namespace App
@@ -122,12 +127,20 @@ namespace App
 		audioStatsCallback_ = new Callbacks::AudioStatsCallback();
 		audioRecordingCallback_ = new Callbacks::AudioRecordingCallback(*audioStatsCallback_);
 		audioBufferCallback_ = new Callbacks::AudioBufferCallback();
-
+		audioPlaybackCallback_ = new Callbacks::AudioPlaybackCallback();
+		
 		audioBackend_.RegisterCallback(audioStatsCallback_, 0x1, 0x0);
 		audioBackend_.RegisterCallback(audioRecordingCallback_, 0x1, 0x0);
 		audioBackend_.RegisterCallback(audioBufferCallback_, 0x1, 0xf);
+		audioBackend_.RegisterCallback(audioPlaybackCallback_, 0x0, 0xf);
 
 		dialogDeviceSelection_ = new Gui::DialogDeviceSelection(audioBackend_, settings_.audioSettings_);
+
+		// Attempt to start device.
+		if(audioBackend_.StartDevice(settings_.audioSettings_))
+		{
+			deviceSelectionStatus_ = Gui::DeviceSelectionStatus::SELECTED;
+		}
 
 		return true;
 	}
@@ -137,6 +150,7 @@ namespace App
 		delete cmdList_;
 		delete window_;
 
+		audioBackend_.UnregisterCallback(audioPlaybackCallback_);
 		audioBackend_.UnregisterCallback(audioStatsCallback_);
 		audioBackend_.UnregisterCallback(audioRecordingCallback_);
 		audioBackend_.UnregisterCallback(audioBufferCallback_);
@@ -241,29 +255,90 @@ namespace App
 					
 				f32 rms = audioStatsCallback_->rms_;
 				f32 rmsSmoothed = audioStatsCallback_->rmsSmoothed_;
-				//ImGui::SliderFloat("RMS", &rms, 0.0f, 1.0f);
 				ImGui::SliderFloat("RMS Smoothed", &rmsSmoothed, 0.0f, 1.0f);
 
 				f32 max = audioStatsCallback_->max_;
 				f32 maxSmoothed = audioStatsCallback_->maxSmoothed_;
-				//ImGui::SliderFloat("Max", &max, 0.0f, 1.0f);
 				ImGui::SliderFloat("Max Smoothed", &maxSmoothed, 0.0f, 1.0f);
 
-				if(ImGui::Button("Save"))
+				ImGui::Separator();
+
+				if(audioRecordingCallback_->IsRecording())
 				{
-					audioRecordingCallback_->SaveBuffer();
+					ImGui::TextColored(ImVec4(0.8f, 0.0f, 0.0f, 1.0f), "* RECORDING");
+				}
+				else
+				{
+					ImGui::Text("* Waiting...");
 				}
 
-				ImGui::Separator();
-				ImGui::Text("Recordings");
+				f32 stopTimeout = audioRecordingCallback_->GetTimeout();
+				Gui::SliderFloat("Stop Timeout:", &stopTimeout, 0.0f, 30.0f);
+				audioRecordingCallback_->SetTimeout(stopTimeout);
 
-				Core::Array<char, Core::MAX_PATH_LENGTH> fileName;
+				f32 startThreshold = audioRecordingCallback_->GetThresholdStart();
+				Gui::SliderFloat("Start Threshold:", &startThreshold, 0.0f, 1.0f);
+				audioRecordingCallback_->SetThresholdStart(startThreshold);
+				
+				f32 stopThreshold = audioRecordingCallback_->GetThresholdStop();
+				Gui::SliderFloat("Stop Threshhold:", &stopThreshold, 0.0f, 1.0f);
+				audioRecordingCallback_->SetThresholdStop(stopThreshold);
+
+				if(ImGui::Button("Start Recording"))
+					audioRecordingCallback_->Start();
+				ImGui::SameLine();
+				if(ImGui::Button("Stop Recording"))
+					audioRecordingCallback_->Stop();
+
+				ImGui::Separator();
+
+
+				f32 countDownTimer = audioRecordingCallback_->RecordingTimeLeft();
+				ImGui::SliderFloat("", &countDownTimer, 0.0f, audioRecordingCallback_->GetTimeout());
+
+				Core::Vector<Core::String> fileNames;
 				auto recordingIds = audioRecordingCallback_->GetRecordingIDs();
 				for(auto id : recordingIds)
 				{
-					sprintf_s(fileName.data(), fileName.size(), "audio_out_%08u.wav", id);
-					ImGui::BulletText("- %s", fileName.data());
+					Core::String fileName;
+					fileName.Printf("audio_out_%08u.wav", id);
+					fileNames.push_back(fileName);
 				}
+
+				if(fileNames.size() > 0)
+				{
+					ImGui::Columns(2);
+
+					static int selectedRecording = 0;
+					if(Gui::ListBox("Recordings:", &selectedRecording,
+						[](void* data, int idx, const char** out_text)
+					{
+						const Core::Vector<Core::String>& fileNames = *static_cast<const Core::Vector<Core::String>*>(data);
+						if(idx >= fileNames.size())
+							return false;
+						*out_text = fileNames[idx].c_str();
+						return true;
+					}, &fileNames, fileNames.size(), 16))
+					{
+						audioPlaybackCallback_->Play(fileNames[selectedRecording].c_str());
+					}
+				
+
+					ImGui::NextColumn();
+
+					if(ImGui::Button("Play"))
+					{
+						audioPlaybackCallback_->Play(fileNames[selectedRecording].c_str());
+					}
+					if(ImGui::Button("Stop"))
+					{
+						audioPlaybackCallback_->Stop();
+					}
+
+					ImGui::Columns(1);
+				}
+
+				
 			}
 			ImGui::End();
 		}

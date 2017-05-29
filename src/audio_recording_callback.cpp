@@ -29,23 +29,29 @@ namespace Callbacks
 
 		if(numIn > 0)
 		{
-			if(outputStream_ == nullptr && audioStats_.max_ > 0.01f)
+			bool shouldStart = Core::AtomicCmpExchg(&startSignal_, 0, 1) == 1;
+			if(outputStream_ == nullptr && (shouldStart || audioStats_.max_ > thresholdStart_))
 			{
 				outputStream_ = new Sound::OutputStream(sampleRate);
+				remainingTimeToStop_ = timeout_;
 			}
 
-			if(audioStats_.max_ > 0.1f)
+			// If automatic stopping is enabled, then count towards it.
+			if(autoStop_)
 			{
-				lowMaxSamples_ = 0;
-			}
-			else
-			{
-				lowMaxSamples_ += numFrames;
-			}
+				if(audioStats_.max_ > thresholdStop_)
+				{
+					remainingTimeToStop_ = timeout_;
+				}
+				else if(remainingTimeToStop_ > 0.0f)
+				{
+					remainingTimeToStop_ -= (f32)numFrames / (f32)sampleRate;
+				}
 
-			if(outputStream_ != nullptr && lowMaxSamples_ > (2 * sampleRate))
-			{
-				Core::AtomicExchg(&saveBuffer_, 1);
+				if(outputStream_ != nullptr && remainingTimeToStop_ <= 0.0f )
+				{
+					Stop();
+				}
 			}
 
 			// Create and push to sound buffer.
@@ -54,7 +60,7 @@ namespace Callbacks
 				outputStream_->Push(in[0], sizeof(f32) * numFrames);
 
 				// If we need to save, kick of a job to delete and finalize.
-				if(Core::AtomicCmpExchg(&saveBuffer_, 0, 1) == 1)
+				if(Core::AtomicCmpExchg(&stopSignal_, 0, 1) == 1)
 				{
 					if(outputStreamCounter_)
 					{
@@ -77,15 +83,20 @@ namespace Callbacks
 
 					outputStream_ = nullptr;
 
-					lowMaxSamples_ = 0;
+					remainingTimeToStop_ = timeout_;
 				}
 			}
 		}
 	}
 
-	void AudioRecordingCallback::SaveBuffer()
+	void AudioRecordingCallback::Start()
 	{
-		Core::AtomicExchg(&saveBuffer_, 1);
+		Core::AtomicExchg(&startSignal_, 1);
+	}
+
+	void AudioRecordingCallback::Stop()
+	{
+		Core::AtomicExchg(&stopSignal_, 1);
 	}
 
 	Core::Vector<i32> AudioRecordingCallback::GetRecordingIDs() const
